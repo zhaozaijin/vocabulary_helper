@@ -463,7 +463,7 @@ def seed_demo_data(force: bool = False) -> None:
             db.execute(f"DELETE FROM {table}")
     existing = db.one("SELECT id FROM users LIMIT 1")
     if existing:
-        upsert_textbook_lessons()
+        ensure_material_lessons_seeded()
         return
 
     created_at = now_iso()
@@ -487,16 +487,25 @@ def seed_demo_data(force: bool = False) -> None:
         "INSERT INTO classes (id,name,grade,teacher_id,created_at) VALUES (?,?,?,?,?)",
         (class_id, "一年级 1 班", "一年级", teacher_id, created_at),
     )
-    upsert_textbook_lessons()
-    upsert_lesson(
-        "lesson_demo_qing",
-        "一年级",
-        "下册",
-        1,
-        "识字练习：天气和心情",
-        "晴天里，小朋友看着清清的小河，心情很好。请大家认真学习生字和词语。",
-        DEMO_LESSON_CHARS,
+    ensure_material_lessons_seeded()
+
+
+def ensure_teacher_exists(teacher_id: str) -> Dict[str, Any]:
+    normalized_id = teacher_id.strip() or "teacher_demo"
+    teacher = db.one("SELECT * FROM users WHERE id=? AND role='teacher'", (normalized_id,))
+    if teacher:
+        return teacher
+    db.execute(
+        "INSERT INTO users (id,name,role,class_id,created_at) VALUES (?,?,?,?,?)",
+        (normalized_id, "张老师" if normalized_id == "teacher_demo" else "默认教师", "teacher", None, now_iso()),
     )
+    return db.one("SELECT * FROM users WHERE id=? AND role='teacher'", (normalized_id,)) or {
+        "id": normalized_id,
+        "name": "默认教师",
+        "role": "teacher",
+        "class_id": None,
+        "created_at": now_iso(),
+    }
 
 
 def build_char_payload(ch: str) -> Dict[str, Any]:
@@ -559,6 +568,26 @@ def upsert_textbook_lessons() -> None:
             item["content"],
             item["chars"],
         )
+
+
+def upsert_demo_lesson() -> None:
+    upsert_lesson(
+        "lesson_demo_qing",
+        "一年级",
+        "下册",
+        1,
+        "识字练习：天气和心情",
+        "晴天里，小朋友看着清清的小河，心情很好。请大家认真学习生字和词语。",
+        DEMO_LESSON_CHARS,
+    )
+
+
+def ensure_material_lessons_seeded() -> None:
+    lesson_count = db.one("SELECT COUNT(*) AS count FROM lessons")
+    current_count = int((lesson_count or {}).get("count") or 0)
+    if current_count < len(YEAR_ONE_LESSONS):
+        upsert_textbook_lessons()
+    upsert_demo_lesson()
 
 
 def extract_chars(text: str) -> List[str]:
@@ -1121,16 +1150,14 @@ def list_classes() -> List[Dict[str, Any]]:
 
 @app.post("/api/classes")
 def create_class(request: CreateClassRequest) -> Dict[str, Any]:
-    teacher = db.one("SELECT id FROM users WHERE id=? AND role='teacher'", (request.teacher_id,))
-    if not teacher:
-        raise HTTPException(status_code=404, detail="教师不存在")
+    teacher = ensure_teacher_exists(request.teacher_id)
     class_id = new_id("class")
     db.execute(
         "INSERT INTO classes (id,name,grade,teacher_id,created_at) VALUES (?,?,?,?,?)",
-        (class_id, request.name, request.grade, request.teacher_id, now_iso()),
+        (class_id, request.name.strip(), request.grade.strip(), teacher["id"], now_iso()),
     )
     row = db.one("SELECT * FROM classes WHERE id=?", (class_id,))
-    return row or {"id": class_id, "name": request.name, "grade": request.grade, "teacher_id": request.teacher_id}
+    return row or {"id": class_id, "name": request.name.strip(), "grade": request.grade.strip(), "teacher_id": teacher["id"]}
 
 
 @app.get("/api/classes/{class_id}/students")
@@ -1160,6 +1187,7 @@ def import_students(class_id: str, request: ImportStudentsRequest) -> Dict[str, 
 
 @app.get("/api/materials/lessons")
 def list_lessons(grade: Optional[str] = None) -> List[Dict[str, Any]]:
+    ensure_material_lessons_seeded()
     order_sql = "grade, CASE volume WHEN '上册' THEN 1 WHEN '下册' THEN 2 ELSE 3 END, unit_no, CASE WHEN id LIKE 'pep_%' THEN 0 ELSE 1 END, id, title"
     if grade:
         rows = db.query(f"SELECT * FROM lessons WHERE grade=? ORDER BY {order_sql}", (grade,))

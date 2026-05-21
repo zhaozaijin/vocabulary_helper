@@ -73,7 +73,6 @@ import './styles.css';
 
 const { Header, Content } = Layout;
 const { Title, Text } = Typography;
-const DEFAULT_CLASS_ID = 'class_1_1';
 const DEFAULT_TEACHER_ID = 'teacher_demo';
 
 function useBootstrap() {
@@ -104,7 +103,7 @@ function useBootstrap() {
       const currentClassId = preferredClassId || selectedClassId;
       const nextClassId = classRows.some((item) => item.id === currentClassId)
         ? currentClassId
-        : classRows[0]?.id || DEFAULT_CLASS_ID;
+        : classRows[0]?.id;
       setSelectedClassId(nextClassId);
       await loadStudents(nextClassId);
     } finally {
@@ -143,6 +142,13 @@ function readFileAsText(file: File) {
     reader.onerror = () => reject(reader.error || new Error('文件读取失败'));
     reader.readAsText(file, 'utf-8');
   });
+}
+
+function resolveClassId(classes: ClassRoom[], selectedClassId?: string): string | undefined {
+  if (selectedClassId && classes.some((item) => item.id === selectedClassId)) {
+    return selectedClassId;
+  }
+  return classes[0]?.id;
 }
 
 function parseConfusingChars(value?: string): Array<{ char: string; reason: string }> {
@@ -201,6 +207,7 @@ function TeacherStudio({
   const [learningCardItem, setLearningCardItem] = useState<CharacterItem | null>(null);
   const materialImageInputRef = useRef<HTMLInputElement>(null);
   const wordListInputRef = useRef<HTMLInputElement>(null);
+  const activeClassId = resolveClassId(classes, selectedClassId);
 
   useEffect(() => {
     if (lessons[0] && !selectedLessonId) {
@@ -226,14 +233,14 @@ function TeacherStudio({
     if (!pack) return;
     taskForm.setFieldsValue({
       title: `${pack.content.lesson.title} AI 听写任务`,
-      class_id: selectedClassId || classes[0]?.id || DEFAULT_CLASS_ID,
+      class_id: activeClassId,
       question_type: 'word',
       selected_answers: pack.content.dictation_items.map((item) => item.answer),
       interval_seconds: 8,
       repeat: 1,
       deadline: ''
     });
-  }, [pack, selectedClassId, taskForm]);
+  }, [activeClassId, pack, taskForm]);
 
   const uploadMaterialImage = async (file?: File) => {
     if (!file) return;
@@ -446,6 +453,11 @@ function TeacherStudio({
       message.warning('请至少选择一个听写词语');
       return;
     }
+    const targetClassId = values.class_id || activeClassId;
+    if (!targetClassId) {
+      message.warning('请先创建并选择一个班级');
+      return;
+    }
     setLoading(true);
     try {
       await apiRequest<LearningPack>(`/learning-packs/${pack.id}/confirm`, {
@@ -455,7 +467,7 @@ function TeacherStudio({
       const created = await apiRequest<DictationTask>('/dictation-tasks', {
         method: 'POST',
         body: JSON.stringify({
-          class_id: values.class_id || selectedClassId || classes[0]?.id || DEFAULT_CLASS_ID,
+          class_id: targetClassId,
           teacher_id: DEFAULT_TEACHER_ID,
           learning_pack_id: pack.id,
           title: values.title,
@@ -738,6 +750,7 @@ function TeacherStudio({
                       <Col xs={24} md={12}>
                         <Form.Item name="class_id" label="发布班级" rules={[{ required: true }]}>
                           <Select
+                            placeholder="请先创建班级"
                             onChange={(value) => onClassChange(value).catch((error) => message.error(error.message))}
                             options={classes.map((item) => ({ value: item.id, label: `${item.name} · ${item.grade}` }))}
                           />
@@ -1005,10 +1018,10 @@ function ClassManager({
   const [studentForm] = Form.useForm();
   const [students, setStudents] = useState<Student[]>([]);
   const [loading, setLoading] = useState(false);
-  const classId = selectedClassId || classes[0]?.id;
+  const classId = resolveClassId(classes, selectedClassId);
 
   useEffect(() => {
-    if (!selectedClassId && classes[0]) {
+    if (classes[0] && (!selectedClassId || !classes.some((item) => item.id === selectedClassId))) {
       onClassChange(classes[0].id).catch((error) => message.error(error.message));
     }
   }, [classes, onClassChange, selectedClassId]);
@@ -1033,7 +1046,6 @@ function ClassManager({
       });
       message.success('班级已创建');
       classForm.resetFields();
-      await onClassChange(created.id);
       await onDataChanged(created.id);
       await loadStudents(created.id);
     } catch (error) {
@@ -1094,6 +1106,7 @@ function ClassManager({
           <Space direction="vertical" className="full">
             <Text strong>选择班级</Text>
               <Select
+                placeholder="请先创建班级"
                 value={classId}
                 onChange={(value) => {
                   onClassChange(value).catch((error) => message.error(error.message));
@@ -2081,9 +2094,15 @@ function ReportsPanel({
   const [report, setReport] = useState<TaskReport | null>(null);
   const [anonymousExport, setAnonymousExport] = useState(false);
   const [loading, setLoading] = useState(false);
-  const classId = selectedClassId || classes[0]?.id || DEFAULT_CLASS_ID;
+  const classId = resolveClassId(classes, selectedClassId);
 
   const loadTasks = async () => {
+    if (!classId) {
+      setTasks([]);
+      setSelectedTaskId(undefined);
+      setReport(null);
+      return;
+    }
     const rows = await apiRequest<DictationTask[]>(`/classes/${classId}/dictation-tasks`);
     setTasks(rows);
     setSelectedTaskId((current) => (rows.some((item) => item.id === current) ? current : rows[0]?.id));
@@ -2160,7 +2179,7 @@ function ReportsPanel({
           )}
         </Space>
       </Card>
-      <ReviewQueue classId={classId} taskId={selectedTaskId} onReviewed={() => loadReport(selectedTaskId)} />
+      {classId && <ReviewQueue classId={classId} taskId={selectedTaskId} onReviewed={() => loadReport(selectedTaskId)} />}
       {report ? <ReportView report={report} /> : <Empty description="发布并完成听写后可查看报告" />}
     </Space>
   );
