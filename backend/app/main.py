@@ -20,6 +20,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+try:
+    from .textbook_knowledge import TEXTBOOK_CHAR_META, YEAR_ONE_LESSONS
+except ImportError:  # pragma: no cover - supports direct script execution in local debugging.
+    from textbook_knowledge import TEXTBOOK_CHAR_META, YEAR_ONE_LESSONS
+
 
 APP_NAME = "AI 生字词智能过关小助手"
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./data/app.db")
@@ -410,7 +415,13 @@ KNOWN_CHARS: Dict[str, Dict[str, Any]] = {
 }
 
 
+KNOWN_CHARS.update({char: meta for char, meta in TEXTBOOK_CHAR_META.items() if char not in KNOWN_CHARS})
+
 DEMO_LESSON_CHARS = ["晴", "睛", "情", "请", "清", "已", "己", "生", "字", "词"]
+TEXTBOOK_LESSON_CHARS = list(
+    dict.fromkeys(char for lesson in YEAR_ONE_LESSONS for char in lesson.get("chars", []))
+)
+KNOWLEDGE_BASE_FALLBACK_CHARS = list(dict.fromkeys(DEMO_LESSON_CHARS + TEXTBOOK_LESSON_CHARS))
 
 
 def init_db() -> None:
@@ -437,6 +448,7 @@ def seed_demo_data(force: bool = False) -> None:
             db.execute(f"DELETE FROM {table}")
     existing = db.one("SELECT id FROM users LIMIT 1")
     if existing:
+        upsert_textbook_lessons()
         return
 
     created_at = now_iso()
@@ -460,18 +472,15 @@ def seed_demo_data(force: bool = False) -> None:
         "INSERT INTO classes (id,name,grade,teacher_id,created_at) VALUES (?,?,?,?,?)",
         (class_id, "一年级 1 班", "一年级", teacher_id, created_at),
     )
-    chars = [build_char_payload(ch) for ch in DEMO_LESSON_CHARS]
-    db.execute(
-        "INSERT INTO lessons (id,grade,volume,unit_no,title,content,chars_json) VALUES (?,?,?,?,?,?,?)",
-        (
-            "lesson_demo_qing",
-            "一年级",
-            "下册",
-            1,
-            "识字练习：天气和心情",
-            "晴天里，小朋友看着清清的小河，心情很好。请大家认真学习生字和词语。",
-            json_dumps(chars),
-        ),
+    upsert_textbook_lessons()
+    upsert_lesson(
+        "lesson_demo_qing",
+        "一年级",
+        "下册",
+        1,
+        "识字练习：天气和心情",
+        "晴天里，小朋友看着清清的小河，心情很好。请大家认真学习生字和词语。",
+        DEMO_LESSON_CHARS,
     )
 
 
@@ -490,8 +499,51 @@ def build_char_payload(ch: str) -> Dict[str, Any]:
         "confusing_chars": base.get("confusing_chars", []),
         "common_mistakes": base.get("common_mistakes", ["请教师确认易错点。"]),
         "dictation_level": "basic",
-        "needs_teacher_review": ch not in KNOWN_CHARS,
+        "needs_teacher_review": base.get("needs_teacher_review", ch not in KNOWN_CHARS),
     }
+
+
+def upsert_lesson(
+    lesson_id: str,
+    grade: str,
+    volume: str,
+    unit_no: int,
+    title: str,
+    content: str,
+    chars: Iterable[str],
+) -> None:
+    chars_json = json_dumps([build_char_payload(ch) for ch in chars])
+    existing = db.one("SELECT id FROM lessons WHERE id=?", (lesson_id,))
+    if existing:
+        db.execute(
+            """
+            UPDATE lessons
+            SET grade=?, volume=?, unit_no=?, title=?, content=?, chars_json=?
+            WHERE id=?
+            """,
+            (grade, volume, unit_no, title, content, chars_json, lesson_id),
+        )
+        return
+    db.execute(
+        """
+        INSERT INTO lessons (id,grade,volume,unit_no,title,content,chars_json)
+        VALUES (?,?,?,?,?,?,?)
+        """,
+        (lesson_id, grade, volume, unit_no, title, content, chars_json),
+    )
+
+
+def upsert_textbook_lessons() -> None:
+    for item in YEAR_ONE_LESSONS:
+        upsert_lesson(
+            item["id"],
+            item["grade"],
+            item["volume"],
+            int(item["unit_no"]),
+            item["title"],
+            item["content"],
+            item["chars"],
+        )
 
 
 def extract_chars(text: str) -> List[str]:
@@ -499,7 +551,7 @@ def extract_chars(text: str) -> List[str]:
     for ch in re.findall(r"[\u4e00-\u9fff]", text):
         if ch in KNOWN_CHARS and ch not in seen:
             seen.append(ch)
-    for ch in DEMO_LESSON_CHARS:
+    for ch in KNOWLEDGE_BASE_FALLBACK_CHARS:
         if len(seen) >= 10:
             break
         if ch not in seen:
@@ -525,7 +577,7 @@ def build_learning_pack_payload(
                 "type": "word",
                 "answer": answer,
                 "prompt_text": f"请写词语：{answer}",
-                "audio_text": f"请写词语：{answer}",
+                "audio_text": answer,
                 "difficulty": 1 if index <= 5 else 2,
                 "char": item["char"],
             }
@@ -707,12 +759,20 @@ def word_display_pinyin(value: str) -> str:
     return " ".join(result)
 
 
+def clean_dictation_audio_text(value: str, fallback: str = "") -> str:
+    text = (value or fallback or "").strip()
+    for prefix in ("请写词语：", "请写词语:", "请写：", "请写:", "请写这个字：", "请写这个字:"):
+        if text.startswith(prefix):
+            return text[len(prefix) :].strip()
+    return text
+
+
 def choice_options_for(char: str) -> List[str]:
     options = [char] if char else []
     for confusing in CONFUSING_MAP.get(char, []):
         if confusing not in options:
             options.append(confusing)
-    for fallback in DEMO_LESSON_CHARS:
+    for fallback in KNOWLEDGE_BASE_FALLBACK_CHARS:
         if len(options) >= 4:
             break
         if fallback != char and fallback not in options:
@@ -1054,10 +1114,11 @@ def import_students(class_id: str, request: ImportStudentsRequest) -> Dict[str, 
 
 @app.get("/api/materials/lessons")
 def list_lessons(grade: Optional[str] = None) -> List[Dict[str, Any]]:
+    order_sql = "grade, CASE volume WHEN '上册' THEN 1 WHEN '下册' THEN 2 ELSE 3 END, unit_no, CASE WHEN id LIKE 'pep_%' THEN 0 ELSE 1 END, id, title"
     if grade:
-        rows = db.query("SELECT * FROM lessons WHERE grade=? ORDER BY unit_no,title", (grade,))
+        rows = db.query(f"SELECT * FROM lessons WHERE grade=? ORDER BY {order_sql}", (grade,))
     else:
-        rows = db.query("SELECT * FROM lessons ORDER BY grade,unit_no,title")
+        rows = db.query(f"SELECT * FROM lessons ORDER BY {order_sql}")
     for row in rows:
         row["chars"] = json_loads(row.pop("chars_json"), [])
     return rows
@@ -1209,23 +1270,23 @@ def create_dictation_task(request: CreateTaskRequest) -> Dict[str, Any]:
         if question_type == "char":
             answer = char or original_answer
             prompt = item.get("prompt_text") or f"请写这个字：{answer}"
-            audio_text = f"请写这个字：{answer}。{original_answer}的{answer}。" if original_answer and answer else prompt
+            audio_text = answer
         elif question_type == "pinyin":
             answer = word_display_pinyin(original_answer)
             prompt = f"请写拼音：{original_answer}"
-            audio_text = item.get("audio_text") or f"请听词语并写拼音：{original_answer}"
+            audio_text = original_answer
         elif question_type == "pinyin_to_word":
             answer = original_answer
             prompt = f"看拼音写词语：{word_display_pinyin(original_answer)}"
-            audio_text = f"请看拼音，写出对应词语。"
+            audio_text = word_display_pinyin(original_answer)
         elif question_type == "choice":
             answer = char or original_answer[:1]
             prompt = "听音选字：请从选项中选择正确的字"
-            audio_text = f"请听：{answer}。请选择正确的字。"
+            audio_text = answer
         else:
             answer = original_answer
             prompt = item.get("prompt_text") or f"请写：{answer}"
-            audio_text = item.get("audio_text") or prompt
+            audio_text = clean_dictation_audio_text(item.get("audio_text", ""), answer)
         meta = {"char": char, "difficulty": item.get("difficulty", 1), "original_answer": original_answer, "question_type": question_type}
         if question_type == "pinyin_to_word":
             meta["display_pinyin"] = word_display_pinyin(original_answer)
@@ -1285,6 +1346,26 @@ def list_class_tasks(class_id: str) -> List[Dict[str, Any]]:
     return rows
 
 
+def preferred_submission(task_id: str, student_id: str) -> Optional[Dict[str, Any]]:
+    return db.one(
+        """
+        SELECT *
+        FROM submissions
+        WHERE task_id=? AND student_id=?
+        ORDER BY
+          CASE
+            WHEN status IN ('submitted','reviewed') THEN 0
+            WHEN status='in_progress' THEN 1
+            ELSE 2
+          END,
+          COALESCE(submitted_at, created_at) DESC,
+          created_at DESC
+        LIMIT 1
+        """,
+        (task_id, student_id),
+    )
+
+
 @app.get("/api/student/tasks")
 def list_student_tasks(student_id: str = Query(...)) -> List[Dict[str, Any]]:
     student = db.one("SELECT * FROM users WHERE id=? AND role='student'", (student_id,))
@@ -1296,10 +1377,7 @@ def list_student_tasks(student_id: str = Query(...)) -> List[Dict[str, Any]]:
     )
     for row in rows:
         row["settings"] = json_loads(row.pop("settings_json"), {})
-        submission = db.one(
-            "SELECT id,status,correct_count,total_count FROM submissions WHERE task_id=? AND student_id=? ORDER BY created_at DESC",
-            (row["id"], student_id),
-        )
+        submission = preferred_submission(row["id"], student_id)
         row["submission"] = submission
     return rows
 
@@ -1316,6 +1394,9 @@ def get_student_task(task_id: str, student_id: str = Query(...)) -> Dict[str, An
 @app.post("/api/student/tasks/{task_id}/submissions")
 def create_submission(task_id: str, request: CreateSubmissionRequest) -> Dict[str, Any]:
     task = get_student_task(task_id, request.student_id)
+    existing = preferred_submission(task_id, request.student_id)
+    if existing:
+        return get_submission_result(existing["id"])
     submission_id = new_id("sub")
     total_count = len(task["items"])
     db.execute(

@@ -8,3 +8,6 @@ frontend/node_modules/
 frontend/dist/
 deploy/.env
 .env
+
+# Competition submission artifacts
+submission_materials/

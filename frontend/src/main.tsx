@@ -419,7 +419,7 @@ function TeacherStudio({
       type: values.type || 'word',
       answer: values.answer,
       prompt_text: values.prompt_text || `请写：${values.answer}`,
-      audio_text: values.audio_text || values.prompt_text || `请写：${values.answer}`,
+      audio_text: values.audio_text || values.answer,
       difficulty: Number(values.difficulty || 1),
       char: values.char || values.answer?.[0] || ''
     };
@@ -1143,7 +1143,6 @@ function StudentPractice({ students, taskHint }: { students: Student[]; taskHint
   const [repeatTimes, setRepeatTimes] = useState(1);
   const [countdown, setCountdown] = useState(0);
   const [sheetResult, setSheetResult] = useState<AnswerSheetResult | null>(null);
-  const [typedAnswer, setTypedAnswer] = useState('');
   const [manualAnswerResult, setManualAnswerResult] = useState<AnswerResult | null>(null);
   const [mistakes, setMistakes] = useState<MistakeRecord[]>([]);
   const [reviewExercises, setReviewExercises] = useState<Array<Record<string, unknown>>>([]);
@@ -1198,7 +1197,6 @@ function StudentPractice({ students, taskHint }: { students: Student[]; taskHint
       setCurrentIndex(0);
       setPronunciationIndex(0);
       setSheetResult(null);
-      setTypedAnswer('');
       setManualAnswerResult(null);
       setPronunciationResult(null);
       setPlaybackDone(false);
@@ -1219,17 +1217,22 @@ function StudentPractice({ students, taskHint }: { students: Student[]; taskHint
   const currentItem = activeTask?.items[currentIndex];
   const pronunciationItem = activeTask?.items[pronunciationIndex];
   const currentQuestionType = String(activeTask?.settings?.question_type || currentItem?.item_type || 'word');
+  const repeatGapSeconds = repeatTimes > 1 ? Math.max(5, Math.round(intervalSeconds * 0.8)) : 0;
+  const currentItemDurationSeconds = intervalSeconds + repeatGapSeconds * Math.max(0, repeatTimes - 1);
 
   useEffect(() => {
-    setTypedAnswer('');
     setManualAnswerResult(null);
   }, [currentItem?.id]);
 
   useEffect(() => {
     if (!autoPlaying || !activeTask || activeTask.items.length === 0) return;
     const item = activeTask.items[currentIndex];
-    speak(Array.from({ length: repeatTimes }, () => item.audio_text || item.prompt_text).join('。'));
-    setCountdown(intervalSeconds);
+    const speechText = item.audio_text || item.prompt_text;
+    speak(speechText);
+    const repeatTimers = Array.from({ length: Math.max(0, repeatTimes - 1) }, (_, index) =>
+      window.setTimeout(() => speak(speechText), (index + 1) * repeatGapSeconds * 1000)
+    );
+    setCountdown(currentItemDurationSeconds);
     const tick = window.setInterval(() => {
       setCountdown((value) => Math.max(value - 1, 0));
     }, 1000);
@@ -1242,20 +1245,20 @@ function StudentPractice({ students, taskHint }: { students: Student[]; taskHint
         setPlaybackDone(true);
         message.success('听写播放完成，请上传答题照片');
       }
-    }, intervalSeconds * 1000);
+    }, currentItemDurationSeconds * 1000);
     return () => {
+      repeatTimers.forEach((timerId) => window.clearTimeout(timerId));
       window.clearInterval(tick);
       window.clearTimeout(timer);
     };
-  }, [autoPlaying, currentIndex, activeTask, intervalSeconds, repeatTimes]);
+  }, [autoPlaying, currentIndex, activeTask, currentItemDurationSeconds, repeatGapSeconds, repeatTimes]);
 
   const startAutoDictation = () => {
     if (!activeTask) return;
-      setCurrentIndex(0);
-      setSheetResult(null);
-      setTypedAnswer('');
-      setManualAnswerResult(null);
-      setPlaybackDone(false);
+    setCurrentIndex(0);
+    setSheetResult(null);
+    setManualAnswerResult(null);
+    setPlaybackDone(false);
     setAutoPlaying(true);
   };
 
@@ -1285,32 +1288,7 @@ function StudentPractice({ students, taskHint }: { students: Student[]; taskHint
     }
   };
 
-  const submitTypedAnswer = async () => {
-    if (!submission || !currentItem || !typedAnswer.trim()) {
-      message.warning('请先输入答案');
-      return;
-    }
-    setLoading(true);
-    try {
-      const answer = await apiRequest<AnswerResult>(`/submissions/${submission.id}/answers`, {
-        method: 'POST',
-        body: JSON.stringify({ item_id: currentItem.id, raw_answer: typedAnswer, confidence: 1 })
-      });
-      const refreshed = await apiRequest<Submission>(`/submissions/${submission.id}/result`);
-      setManualAnswerResult(answer);
-      setSubmission(refreshed);
-      setSheetResult(null);
-      await loadStudentData();
-      message.success(answer.result === 'correct' ? '文本答案正确' : '已记录本题反馈');
-    } catch (error) {
-      message.error((error as Error).message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const submitChoiceAnswer = async (choice: string) => {
-    setTypedAnswer(choice);
     if (!submission || !currentItem) return;
     setLoading(true);
     try {
@@ -1534,6 +1512,7 @@ function StudentPractice({ students, taskHint }: { students: Student[]; taskHint
                     <Tag>{activeTask.title}</Tag>
                     <Tag>{questionTypeLabel(currentQuestionType)}</Tag>
                     <Tag>重复 {repeatTimes} 遍</Tag>
+                    {repeatTimes > 1 && <Tag color="cyan">每遍间隔 {repeatGapSeconds} 秒</Tag>}
                     {autoPlaying && <Tag color="green">自动播放中</Tag>}
                   </Space>
                   <div className="dictation-card">
@@ -1551,7 +1530,7 @@ function StudentPractice({ students, taskHint }: { students: Student[]; taskHint
                     </div>
                     <Text className="muted">
                       {currentQuestionType === 'pinyin_to_word'
-                        ? '看拼音，在输入框中写出对应词语。'
+                        ? '看拼音，在纸上写出对应词语，完成后上传手写答题照片。'
                         : currentQuestionType === 'choice'
                           ? '听 AI 朗读后，从下方选项中选择正确的字。'
                           : '听 AI 朗读，在纸上写下词语；页面不会直接显示答案。'}
@@ -1590,7 +1569,7 @@ function StudentPractice({ students, taskHint }: { students: Student[]; taskHint
                   {autoPlaying && <Text>距离下一词约 {countdown} 秒</Text>}
                   <Divider />
                   <Space direction="vertical" className="full">
-                    <Text strong>也可以直接输入本题答案，适合家庭练习或投屏演示</Text>
+                    <Text strong>{currentQuestionType === 'choice' ? '听音选字可直接点选；其他听写题需上传手写答案' : '请在纸上完成手写作答，再上传答题照片'}</Text>
                     {currentQuestionType === 'choice' && (
                       <div className="choice-options">
                         {(currentItem.answer_meta?.options || []).map((option) => (
@@ -1600,24 +1579,6 @@ function StudentPractice({ students, taskHint }: { students: Student[]; taskHint
                         ))}
                       </div>
                     )}
-                    <Space.Compact className="full">
-                      <Input
-                        value={typedAnswer}
-                        onChange={(event) => setTypedAnswer(event.target.value)}
-                        onPressEnter={submitTypedAnswer}
-                        placeholder={
-                          currentQuestionType === 'pinyin'
-                            ? '输入拼音答案'
-                            : currentQuestionType === 'choice'
-                              ? '也可直接输入选中的字'
-                              : '输入书写答案'
-                        }
-                        disabled={!submission || loading}
-                      />
-                      <Button type="primary" onClick={submitTypedAnswer} loading={loading} disabled={!submission}>
-                        判题
-                      </Button>
-                    </Space.Compact>
                     {manualAnswerResult && (
                       <Alert
                         type={manualAnswerResult.result === 'correct' ? 'success' : manualAnswerResult.result === 'pending_review' ? 'warning' : 'error'}
