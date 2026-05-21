@@ -121,7 +121,9 @@ class Database:
             conn.close()
 
     def sql(self, statement: str) -> str:
-        return statement.replace("?", "%s") if self.is_postgres else statement
+        if not self.is_postgres:
+            return statement
+        return statement.replace("%", "%%").replace("?", "%s")
 
     def execute(self, statement: str, params: Iterable[Any] = ()) -> None:
         with self.connect() as conn:
