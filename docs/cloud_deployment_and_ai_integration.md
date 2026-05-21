@@ -118,6 +118,18 @@ ALIYUN_ACCESS_KEY_SECRET=你的阿里云AccessKeySecret
 ALIYUN_OCR_ENDPOINT=ocr-api.cn-hangzhou.aliyuncs.com
 ```
 
+如果要启用真实发音识别，当前后端已支持阿里云智能语音交互“一句话识别”：
+
+```bash
+ASR_PROVIDER=aliyun_nls
+ALIYUN_ACCESS_KEY_ID=你的阿里云AccessKeyId
+ALIYUN_ACCESS_KEY_SECRET=你的阿里云AccessKeySecret
+ALIYUN_NLS_APP_KEY=你的智能语音交互项目AppKey
+ALIYUN_NLS_REGION=cn-shanghai
+ALIYUN_NLS_ENDPOINT=https://nls-gateway-cn-shanghai.aliyuncs.com/stream/v1/asr
+ALIYUN_NLS_SAMPLE_RATE=16000
+```
+
 如果要接学校已有 OCR/ASR 网关，也可以配置：
 
 ```bash
@@ -461,21 +473,35 @@ POST /api/pronunciation/evaluate
 
 ### 8.2 云 ASR 增强方案
 
-可接入：
+当前代码已内置阿里云智能语音交互“一句话识别”适配层，适合先完成学生端“看词语练发音”的真实云端识别。学生端录音会上传为 16k WAV，后端自动获取并缓存 NLS Token，再调用一句话识别 REST API。
 
-- 阿里云一句话识别
+启用方式：
+
+```bash
+ASR_PROVIDER=aliyun_nls
+ALIYUN_ACCESS_KEY_ID=你的阿里云AccessKeyId
+ALIYUN_ACCESS_KEY_SECRET=你的阿里云AccessKeySecret
+ALIYUN_NLS_APP_KEY=你的智能语音交互项目AppKey
+ALIYUN_NLS_REGION=cn-shanghai
+ALIYUN_NLS_ENDPOINT=https://nls-gateway-cn-shanghai.aliyuncs.com/stream/v1/asr
+ALIYUN_NLS_SAMPLE_RATE=16000
+ALIYUN_NLS_ENABLE_PUNCTUATION=false
+ALIYUN_NLS_ENABLE_ITN=true
+ALIYUN_NLS_ENABLE_VOICE_DETECTION=true
+```
+
+也可继续接入：
+
 - 腾讯云语音识别
 - 火山引擎语音识别
 - 科大讯飞语音识别
 
-建议新增环境变量：
+学校已有 ASR 网关可使用通用配置：
 
 ```bash
-ASR_PROVIDER=aliyun
-ASR_API_KEY=你的ASRKey
-ASR_API_SECRET=你的ASRSecret
-ASR_LANGUAGE=zh-CN
-ASR_CONFIDENCE_RETRY=0.70
+ASR_PROVIDER=your_asr_gateway
+ASR_API_URL=https://your-asr-gateway.example.com/recognize-pronunciation
+ASR_API_KEY=你的ASR网关Key
 ```
 
 推荐流程：

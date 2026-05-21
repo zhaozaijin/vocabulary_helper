@@ -22,6 +22,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 try:
+    from .aliyun_asr import aliyun_asr_enabled, is_aliyun_asr_provider, recognize_speech_with_aliyun
     from .aliyun_ocr import (
         aliyun_ocr_enabled,
         is_aliyun_ocr_provider,
@@ -30,6 +31,7 @@ try:
     )
     from .textbook_knowledge import TEXTBOOK_CHAR_META, YEAR_ONE_LESSONS
 except ImportError:  # pragma: no cover - supports direct script execution in local debugging.
+    from aliyun_asr import aliyun_asr_enabled, is_aliyun_asr_provider, recognize_speech_with_aliyun
     from aliyun_ocr import (
         aliyun_ocr_enabled,
         is_aliyun_ocr_provider,
@@ -891,6 +893,19 @@ async def call_material_text_ocr(file: UploadFile) -> Tuple[str, float, str]:
 async def call_generic_asr(file: UploadFile, target_text: str) -> Tuple[str, float, str]:
     filename = (file.filename or "").lower()
     content = await file.read()
+    if is_aliyun_asr_provider(ASR_PROVIDER) and aliyun_asr_enabled(ASR_PROVIDER):
+        try:
+            result = await asyncio.to_thread(
+                recognize_speech_with_aliyun,
+                content,
+                file.filename or "pronunciation.wav",
+                file.content_type or "",
+            )
+            if result.recognized_text:
+                return result.recognized_text, result.confidence, result.provider
+        except Exception:
+            pass
+
     if ASR_API_URL and ASR_API_KEY:
         try:
             async with httpx.AsyncClient(timeout=45) as client:
@@ -1079,6 +1094,7 @@ def startup() -> None:
 @app.get("/api/health")
 def health() -> Dict[str, Any]:
     ocr_cloud_ready = (OCR_API_URL and OCR_API_KEY) or aliyun_ocr_enabled(OCR_PROVIDER)
+    asr_cloud_ready = (ASR_API_URL and ASR_API_KEY) or aliyun_asr_enabled(ASR_PROVIDER)
     return {
         "ok": True,
         "name": APP_NAME,
@@ -1086,7 +1102,8 @@ def health() -> Dict[str, Any]:
         "ai_mode": "cloud" if AI_API_BASE and AI_API_KEY else "fallback",
         "ocr_mode": "cloud" if ocr_cloud_ready else "mock",
         "ocr_provider": OCR_PROVIDER,
-        "asr_mode": "cloud" if ASR_API_URL and ASR_API_KEY else "mock",
+        "asr_mode": "cloud" if asr_cloud_ready else "mock",
+        "asr_provider": ASR_PROVIDER,
         "time": now_iso(),
     }
 

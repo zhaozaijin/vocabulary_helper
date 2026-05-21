@@ -1131,6 +1131,95 @@ function ClassManager({
   );
 }
 
+type AudioContextConstructor = new (options?: AudioContextOptions) => AudioContext;
+
+const TARGET_ASR_SAMPLE_RATE = 16000;
+
+function getAudioContextConstructor(): AudioContextConstructor | undefined {
+  return window.AudioContext || (window as Window & { webkitAudioContext?: AudioContextConstructor }).webkitAudioContext;
+}
+
+function createRecordingAudioContext(AudioContextClass: AudioContextConstructor): AudioContext {
+  try {
+    return new AudioContextClass({ sampleRate: TARGET_ASR_SAMPLE_RATE });
+  } catch {
+    return new AudioContextClass();
+  }
+}
+
+function buildWavBlob(chunks: Float32Array[], inputSampleRate: number): Blob {
+  const merged = mergeAudioChunks(chunks);
+  const samples = resampleAudio(merged, inputSampleRate, TARGET_ASR_SAMPLE_RATE);
+  const bytesPerSample = 2;
+  const blockAlign = bytesPerSample;
+  const buffer = new ArrayBuffer(44 + samples.length * bytesPerSample);
+  const view = new DataView(buffer);
+
+  writeAscii(view, 0, 'RIFF');
+  view.setUint32(4, 36 + samples.length * bytesPerSample, true);
+  writeAscii(view, 8, 'WAVE');
+  writeAscii(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, TARGET_ASR_SAMPLE_RATE, true);
+  view.setUint32(28, TARGET_ASR_SAMPLE_RATE * blockAlign, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, 16, true);
+  writeAscii(view, 36, 'data');
+  view.setUint32(40, samples.length * bytesPerSample, true);
+
+  let offset = 44;
+  for (let index = 0; index < samples.length; index += 1) {
+    const sample = Math.max(-1, Math.min(1, samples[index]));
+    view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+    offset += bytesPerSample;
+  }
+  return new Blob([buffer], { type: 'audio/wav' });
+}
+
+function mergeAudioChunks(chunks: Float32Array[]): Float32Array {
+  const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const result = new Float32Array(totalLength);
+  let offset = 0;
+  chunks.forEach((chunk) => {
+    result.set(chunk, offset);
+    offset += chunk.length;
+  });
+  return result;
+}
+
+function resampleAudio(input: Float32Array, fromRate: number, toRate: number): Float32Array {
+  if (!input.length || fromRate === toRate) {
+    return input;
+  }
+  const ratio = fromRate / toRate;
+  const outputLength = Math.max(1, Math.round(input.length / ratio));
+  const output = new Float32Array(outputLength);
+  for (let index = 0; index < outputLength; index += 1) {
+    const sourceIndex = index * ratio;
+    const before = Math.floor(sourceIndex);
+    const after = Math.min(before + 1, input.length - 1);
+    const weight = sourceIndex - before;
+    output[index] = input[before] * (1 - weight) + input[after] * weight;
+  }
+  return output;
+}
+
+function writeAscii(view: DataView, offset: number, value: string): void {
+  for (let index = 0; index < value.length; index += 1) {
+    view.setUint8(offset + index, value.charCodeAt(index));
+  }
+}
+
+function extensionFromAudioType(type: string): string {
+  if (type.includes('wav')) return 'wav';
+  if (type.includes('mpeg') || type.includes('mp3')) return 'mp3';
+  if (type.includes('ogg')) return 'ogg';
+  if (type.includes('aac') || type.includes('mp4')) return 'aac';
+  return 'webm';
+}
+
 function StudentPractice({ students, taskHint }: { students: Student[]; taskHint?: DictationTask | null }) {
   const [studentId, setStudentId] = useState<string | undefined>(students[0]?.id);
   const [tasks, setTasks] = useState<DictationTask[]>([]);
@@ -1153,6 +1242,11 @@ function StudentPractice({ students, taskHint }: { students: Student[]; taskHint
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const audioStreamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const audioProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const audioSilentGainRef = useRef<GainNode | null>(null);
+  const pcmChunksRef = useRef<Float32Array[]>([]);
 
   useEffect(() => {
     if (students[0] && !studentId) {
@@ -1339,7 +1433,8 @@ function StudentPractice({ students, taskHint }: { students: Student[]; taskHint
     setLoading(true);
     try {
       const formData = new FormData();
-      const audioFile = new File([blob], `${item.answer}.webm`, { type: blob.type || 'audio/webm' });
+      const audioType = blob.type || 'application/octet-stream';
+      const audioFile = new File([blob], `${item.answer}.${extensionFromAudioType(audioType)}`, { type: audioType });
       formData.append('student_id', studentId);
       formData.append('target_text', item.answer);
       formData.append('item_id', item.id);
@@ -1358,7 +1453,7 @@ function StudentPractice({ students, taskHint }: { students: Student[]; taskHint
 
   const startRecording = async () => {
     if (!pronunciationItem) return;
-    if (!navigator.mediaDevices || typeof MediaRecorder === 'undefined') {
+    if (!navigator.mediaDevices) {
       message.error('当前浏览器不支持录音');
       return;
     }
@@ -1366,6 +1461,41 @@ function StudentPractice({ students, taskHint }: { students: Student[]; taskHint
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       audioStreamRef.current = stream;
       audioChunksRef.current = [];
+      pcmChunksRef.current = [];
+      const AudioContextClass = getAudioContextConstructor();
+      if (AudioContextClass) {
+        const audioContext = createRecordingAudioContext(AudioContextClass);
+        const source = audioContext.createMediaStreamSource(stream);
+        const processor = audioContext.createScriptProcessor(4096, 1, 1);
+        const silentGain = audioContext.createGain();
+        silentGain.gain.value = 0;
+        processor.onaudioprocess = (event) => {
+          const channel = event.inputBuffer.getChannelData(0);
+          pcmChunksRef.current.push(new Float32Array(channel));
+        };
+        source.connect(processor);
+        processor.connect(silentGain);
+        silentGain.connect(audioContext.destination);
+        audioContextRef.current = audioContext;
+        audioSourceRef.current = source;
+        audioProcessorRef.current = processor;
+        audioSilentGainRef.current = silentGain;
+        mediaRecorderRef.current = null;
+        if (audioContext.state === 'suspended') {
+          await audioContext.resume();
+        }
+        setRecording(true);
+        setPronunciationResult(null);
+        return;
+      }
+
+      if (typeof MediaRecorder === 'undefined') {
+        audioStreamRef.current?.getTracks().forEach((track) => track.stop());
+        audioStreamRef.current = null;
+        message.error('当前浏览器不支持录音');
+        return;
+      }
+
       const recorder = new MediaRecorder(stream);
       mediaRecorderRef.current = recorder;
       recorder.ondataavailable = (event) => {
@@ -1383,11 +1513,39 @@ function StudentPractice({ students, taskHint }: { students: Student[]; taskHint
       setRecording(true);
       setPronunciationResult(null);
     } catch (error) {
+      audioStreamRef.current?.getTracks().forEach((track) => track.stop());
+      audioStreamRef.current = null;
       message.error((error as Error).message);
     }
   };
 
   const stopRecording = () => {
+    if (audioProcessorRef.current) {
+      const audioContext = audioContextRef.current;
+      const inputSampleRate = audioContext?.sampleRate || TARGET_ASR_SAMPLE_RATE;
+      const chunks = [...pcmChunksRef.current];
+      audioProcessorRef.current.onaudioprocess = null;
+      audioSourceRef.current?.disconnect();
+      audioProcessorRef.current.disconnect();
+      audioSilentGainRef.current?.disconnect();
+      audioStreamRef.current?.getTracks().forEach((track) => track.stop());
+      audioContext?.close().catch(() => undefined);
+      audioContextRef.current = null;
+      audioSourceRef.current = null;
+      audioProcessorRef.current = null;
+      audioSilentGainRef.current = null;
+      audioStreamRef.current = null;
+      pcmChunksRef.current = [];
+      setRecording(false);
+      if (chunks.length && pronunciationItem) {
+        const blob = buildWavBlob(chunks, inputSampleRate);
+        submitPronunciation(blob, pronunciationItem).catch((error) => message.error(error.message));
+      } else {
+        message.error('未录到有效声音，请重试');
+      }
+      return;
+    }
+
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
     }
