@@ -435,10 +435,19 @@ KNOWN_CHARS: Dict[str, Dict[str, Any]] = {
 KNOWN_CHARS.update({char: meta for char, meta in TEXTBOOK_CHAR_META.items() if char not in KNOWN_CHARS})
 
 DEMO_LESSON_CHARS = ["晴", "睛", "情", "请", "清", "已", "己", "生", "字", "词"]
+DEMO_TEACHER_ID = "teacher_demo"
+DEMO_CLASS_ID = "class_1_1"
+DEMO_PACK_ID = "pack_demo_qing"
+DEMO_TASK_ID = "task_demo_qing"
+DEMO_GENERATION_ID = "ai_demo_qing"
 TEXTBOOK_LESSON_CHARS = list(
     dict.fromkeys(char for lesson in YEAR_ONE_LESSONS for char in lesson.get("chars", []))
 )
 KNOWLEDGE_BASE_FALLBACK_CHARS = list(dict.fromkeys(DEMO_LESSON_CHARS + TEXTBOOK_LESSON_CHARS))
+
+
+def clean_storage_text(value: Any) -> str:
+    return str(value or "").strip()
 
 
 def init_db() -> None:
@@ -447,7 +456,7 @@ def init_db() -> None:
     seed_demo_data()
 
 
-def seed_demo_data(force: bool = False) -> None:
+def seed_demo_data(force: bool = False, full_demo: bool = False) -> Dict[str, Any]:
     if force:
         for table in [
             "submission_answers",
@@ -466,11 +475,11 @@ def seed_demo_data(force: bool = False) -> None:
     existing = db.one("SELECT id FROM users LIMIT 1")
     if existing:
         ensure_material_lessons_seeded()
-        return
+        return {"seeded": False, "class_id": None, "task_id": None}
 
     created_at = now_iso()
-    teacher_id = "teacher_demo"
-    class_id = "class_1_1"
+    teacher_id = DEMO_TEACHER_ID
+    class_id = DEMO_CLASS_ID
     students = [
         ("student_chen", "陈小雨"),
         ("student_lin", "林一凡"),
@@ -490,16 +499,20 @@ def seed_demo_data(force: bool = False) -> None:
         (class_id, "一年级 1 班", "一年级", teacher_id, created_at),
     )
     ensure_material_lessons_seeded()
+    summary = {"seeded": True, "class_id": class_id, "task_id": None}
+    if full_demo:
+        summary.update(seed_full_demo_flow(created_at))
+    return summary
 
 
 def ensure_teacher_exists(teacher_id: str) -> Dict[str, Any]:
-    normalized_id = teacher_id.strip() or "teacher_demo"
+    normalized_id = clean_storage_text(teacher_id) or DEMO_TEACHER_ID
     teacher = db.one("SELECT * FROM users WHERE id=? AND role='teacher'", (normalized_id,))
     if teacher:
         return teacher
     db.execute(
         "INSERT INTO users (id,name,role,class_id,created_at) VALUES (?,?,?,?,?)",
-        (normalized_id, "张老师" if normalized_id == "teacher_demo" else "默认教师", "teacher", None, now_iso()),
+        (normalized_id, "张老师" if normalized_id == DEMO_TEACHER_ID else "默认教师", "teacher", None, now_iso()),
     )
     return db.one("SELECT * FROM users WHERE id=? AND role='teacher'", (normalized_id,)) or {
         "id": normalized_id,
@@ -507,6 +520,190 @@ def ensure_teacher_exists(teacher_id: str) -> Dict[str, Any]:
         "role": "teacher",
         "class_id": None,
         "created_at": now_iso(),
+    }
+
+
+def seed_full_demo_flow(created_at: str) -> Dict[str, Any]:
+    content = "晴天里，小朋友看着清清的小河，心情很好。请大家认真学习生字和词语。"
+    lesson_chars = [build_char_payload(ch) for ch in DEMO_LESSON_CHARS]
+    payload = build_learning_pack_payload("一年级", "下册", "第一单元", "识字练习：天气和心情", content, lesson_chars)
+    dictation_items = payload["dictation_items"][:8]
+    selected_answers = [item["answer"] for item in dictation_items]
+
+    db.execute(
+        """
+        INSERT INTO ai_generation_records
+        (id,scene,model_provider,model_name,prompt_version,input_hash,output_json,latency_ms,status,created_by,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            DEMO_GENERATION_ID,
+            "learning_pack",
+            "demo_seed",
+            AI_MODEL,
+            "learning_pack_v1",
+            hashlib.sha256(json_dumps(payload).encode("utf-8")).hexdigest(),
+            json_dumps(payload),
+            0,
+            "fallback",
+            DEMO_TEACHER_ID,
+            created_at,
+        ),
+    )
+    db.execute(
+        """
+        INSERT INTO learning_packs
+        (id,lesson_id,creator_id,title,grade,volume,unit_name,source_type,status,content_json,ai_generation_id,created_at,confirmed_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            DEMO_PACK_ID,
+            "lesson_demo_qing",
+            DEMO_TEACHER_ID,
+            "识字练习：天气和心情",
+            "一年级",
+            "下册",
+            "第一单元",
+            "textbook",
+            "confirmed",
+            json_dumps(payload),
+            DEMO_GENERATION_ID,
+            created_at,
+            created_at,
+        ),
+    )
+
+    published_at = now_iso()
+    db.execute(
+        """
+        INSERT INTO dictation_tasks
+        (id,class_id,teacher_id,learning_pack_id,title,mode,status,settings_json,created_at,deadline,published_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            DEMO_TASK_ID,
+            DEMO_CLASS_ID,
+            DEMO_TEACHER_ID,
+            DEMO_PACK_ID,
+            "识字练习：天气和心情 AI 听写任务",
+            "classroom",
+            "published",
+            json_dumps(
+                {
+                    "speed": 0.9,
+                    "repeat": 2,
+                    "interval_seconds": 10,
+                    "question_type": "word",
+                    "selected_answers": selected_answers,
+                }
+            ),
+            created_at,
+            (datetime.utcnow() + timedelta(days=7)).isoformat(timespec="seconds") + "Z",
+            published_at,
+        ),
+    )
+
+    item_rows = []
+    item_ids: List[str] = []
+    for index, item in enumerate(dictation_items, start=1):
+        answer = clean_storage_text(item.get("answer"))
+        char = clean_storage_text(item.get("char")) or (answer[0] if answer else "")
+        item_id = f"item_demo_qing_{index:02d}"
+        item_ids.append(item_id)
+        item_rows.append(
+            (
+                item_id,
+                DEMO_TASK_ID,
+                "word",
+                clean_storage_text(item.get("prompt_text")) or f"请写：{answer}",
+                answer,
+                json_dumps({"char": char, "difficulty": item.get("difficulty", 1), "original_answer": answer, "question_type": "word"}),
+                clean_dictation_audio_text(clean_storage_text(item.get("audio_text")), answer),
+                index,
+                int(item.get("difficulty", 1)),
+            )
+        )
+    db.many(
+        """
+        INSERT INTO dictation_items
+        (id,task_id,item_type,prompt_text,answer,answer_meta_json,audio_text,order_no,difficulty)
+        VALUES (?,?,?,?,?,?,?,?,?)
+        """,
+        item_rows,
+    )
+
+    answer_by_item = {row[0]: row[4] for row in item_rows}
+
+    def wrong_answer(answer: str) -> str:
+        replacements = {"眼睛": "眼晴", "心情": "心晴", "请问": "清问", "清水": "请水", "自己": "自已"}
+        return replacements.get(answer, inject_demo_error(answer))
+
+    def seed_submission(student_id: str, suffix: str, wrong_indexes: Iterable[int] = (), pending_indexes: Iterable[int] = (), answered_count: Optional[int] = None) -> None:
+        submission_id = f"sub_demo_{suffix}"
+        total_count = len(item_ids)
+        limit = answered_count or total_count
+        db.execute(
+            """
+            INSERT INTO submissions
+            (id,task_id,student_id,status,total_count,correct_count,wrong_count,suspected_count,pending_review_count,created_at,submitted_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (submission_id, DEMO_TASK_ID, student_id, "in_progress", total_count, 0, 0, 0, 0, created_at, None),
+        )
+        wrong_set = set(wrong_indexes)
+        pending_set = set(pending_indexes)
+        for order_no, item_id in enumerate(item_ids[:limit], start=1):
+            answer = answer_by_item[item_id]
+            if order_no in pending_set:
+                record_answer(submission_id, item_id, answer, 0.62)
+            elif order_no in wrong_set:
+                record_answer(submission_id, item_id, wrong_answer(answer), 0.91)
+            else:
+                record_answer(submission_id, item_id, answer, 0.96)
+        status = "in_progress" if limit < total_count else "submitted"
+        submitted_at = None if status == "in_progress" else now_iso()
+        db.execute("UPDATE submissions SET status=?, submitted_at=? WHERE id=?", (status, submitted_at, submission_id))
+
+    seed_submission("student_zhou", "zhou", wrong_indexes=())
+    seed_submission("student_li", "li", wrong_indexes=(2, 5))
+    seed_submission("student_lin", "lin", wrong_indexes=(3,), pending_indexes=(4,))
+    seed_submission("student_wang", "wang", wrong_indexes=(1,), answered_count=4)
+    seed_submission("student_zhao", "zhao", wrong_indexes=())
+
+    pronunciation_cases = [
+        ("student_zhou", item_ids[0], selected_answers[0], selected_answers[0], 0.95, "mock"),
+        ("student_li", item_ids[1], selected_answers[1], wrong_answer(selected_answers[1]), 0.72, "mock"),
+        ("student_lin", item_ids[2], selected_answers[2], selected_answers[2], 0.88, "mock"),
+    ]
+    for student_id, item_id, target_text, recognized_text, confidence, provider in pronunciation_cases:
+        result = evaluate_pronunciation_result(target_text, recognized_text, confidence)
+        db.execute(
+            """
+            INSERT INTO pronunciation_records
+            (id,student_id,item_id,target_text,recognized_text,expected_pinyin,score,mastery,issues_json,correction_json,provider,created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                new_id("pron"),
+                student_id,
+                item_id,
+                target_text,
+                result["recognized_text"],
+                result["expected_pinyin"],
+                result["score"],
+                result["mastery"],
+                json_dumps(result["issues"]),
+                json_dumps(result["correction"]),
+                provider,
+                now_iso(),
+            ),
+        )
+
+    return {
+        "learning_pack_id": DEMO_PACK_ID,
+        "task_id": DEMO_TASK_ID,
+        "student_count": 6,
+        "dictation_item_count": len(item_ids),
     }
 
 
@@ -1141,8 +1338,8 @@ def health() -> Dict[str, Any]:
 
 @app.post("/api/demo/reset")
 def reset_demo() -> Dict[str, Any]:
-    seed_demo_data(force=True)
-    return {"ok": True}
+    summary = seed_demo_data(force=True, full_demo=True)
+    return {"ok": True, **summary}
 
 
 @app.get("/api/classes")
@@ -1153,13 +1350,25 @@ def list_classes() -> List[Dict[str, Any]]:
 @app.post("/api/classes")
 def create_class(request: CreateClassRequest) -> Dict[str, Any]:
     teacher = ensure_teacher_exists(request.teacher_id)
+    class_name = clean_storage_text(request.name)
+    grade = clean_storage_text(request.grade)
+    if not class_name:
+        raise HTTPException(status_code=400, detail="班级名称不能为空")
+    if not grade:
+        raise HTTPException(status_code=400, detail="年级不能为空")
+    existing = db.one(
+        "SELECT * FROM classes WHERE teacher_id=? AND grade=? AND name=?",
+        (teacher["id"], grade, class_name),
+    )
+    if existing:
+        raise HTTPException(status_code=409, detail=f"{grade}已存在班级：{class_name}")
     class_id = new_id("class")
     db.execute(
         "INSERT INTO classes (id,name,grade,teacher_id,created_at) VALUES (?,?,?,?,?)",
-        (class_id, request.name.strip(), request.grade.strip(), teacher["id"], now_iso()),
+        (class_id, class_name, grade, teacher["id"], now_iso()),
     )
     row = db.one("SELECT * FROM classes WHERE id=?", (class_id,))
-    return row or {"id": class_id, "name": request.name.strip(), "grade": request.grade.strip(), "teacher_id": teacher["id"]}
+    return row or {"id": class_id, "name": class_name, "grade": grade, "teacher_id": teacher["id"]}
 
 
 @app.get("/api/classes/{class_id}/students")
@@ -1175,7 +1384,7 @@ def import_students(class_id: str, request: ImportStudentsRequest) -> Dict[str, 
     names = []
     seen = set()
     for name in request.names:
-        cleaned = str(name).strip()
+        cleaned = clean_storage_text(name)
         if cleaned and cleaned not in seen:
             seen.add(cleaned)
             names.append(cleaned)

@@ -2598,10 +2598,39 @@ function formatBeijingTime(value?: string | null) {
     .replace(/\//g, '-')}`;
 }
 
+interface DemoResetResult {
+  ok: boolean;
+  class_id?: string;
+  task_id?: string;
+}
+
 function RootApp() {
   const { classes, lessons, students, selectedClassId, loading, reload, changeClass } = useBootstrap();
   const [latestTask, setLatestTask] = useState<DictationTask | null>(null);
   const [activeKey, setActiveKey] = useState('teacher');
+  const [resettingDemo, setResettingDemo] = useState(false);
+
+  const initializeDemoData = async () => {
+    setResettingDemo(true);
+    try {
+      const result = await apiRequest<DemoResetResult>('/demo/reset', {
+        method: 'POST'
+      });
+      await reload(result.class_id);
+      if (result.task_id) {
+        const task = await apiRequest<DictationTask>(`/dictation-tasks/${result.task_id}`);
+        setLatestTask(task);
+      } else {
+        setLatestTask(null);
+      }
+      setActiveKey('teacher');
+      message.success('演示数据已初始化');
+    } catch (error) {
+      message.error((error as Error).message);
+    } finally {
+      setResettingDemo(false);
+    }
+  };
 
   const items = useMemo(
     () => [
@@ -2648,10 +2677,21 @@ function RootApp() {
           <Text className="header-subtitle">小学一二年级语文 · 参赛 MVP 演示版</Text>
         </div>
         <Space wrap>
-          <Tag color={loading ? 'gold' : 'green'}>{loading ? '初始化中' : '演示数据已就绪'}</Tag>
+          <Tag color={loading || resettingDemo ? 'gold' : 'green'}>{loading || resettingDemo ? '初始化中' : '演示数据已就绪'}</Tag>
           <Tag color="blue">课堂听写</Tag>
           <Tag color="cyan">照片判题</Tag>
           <Tag color="purple">发音评估</Tag>
+          <Popconfirm
+            title="初始化演示数据"
+            description="会清空当前演示业务数据并重建班级、学生、任务、作答和报告。"
+            okText="初始化"
+            cancelText="取消"
+            onConfirm={initializeDemoData}
+          >
+            <Button size="small" danger loading={resettingDemo}>
+              初始化演示数据
+            </Button>
+          </Popconfirm>
         </Space>
       </Header>
       <Content className="content">
