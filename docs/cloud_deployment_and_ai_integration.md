@@ -109,7 +109,16 @@ AI_MODEL=qwen-plus
 
 未配置 `AI_API_KEY` 时，系统会自动使用内置演示规则生成学习包，仍可完整演示。
 
-如果要启用真实答题照片识别和发音评估，可配置学校已有 OCR/ASR 网关：
+如果要启用真实答题照片识别，当前后端已支持阿里云 OCR：
+
+```bash
+OCR_PROVIDER=aliyun
+ALIYUN_ACCESS_KEY_ID=你的阿里云AccessKeyId
+ALIYUN_ACCESS_KEY_SECRET=你的阿里云AccessKeySecret
+ALIYUN_OCR_ENDPOINT=ocr-api.cn-hangzhou.aliyuncs.com
+```
+
+如果要接学校已有 OCR/ASR 网关，也可以配置：
 
 ```bash
 OCR_PROVIDER=your_ocr_gateway
@@ -400,11 +409,20 @@ POST /api/submissions/{submission_id}/answers/image-sheet
 
 ```bash
 OCR_PROVIDER=aliyun
-OCR_API_KEY=你的OCRKey
-OCR_API_SECRET=你的OCRSecret
+ALIYUN_ACCESS_KEY_ID=你的阿里云AccessKeyId
+ALIYUN_ACCESS_KEY_SECRET=你的阿里云AccessKeySecret
+ALIYUN_OCR_ENDPOINT=ocr-api.cn-hangzhou.aliyuncs.com
 OCR_CONFIDENCE_AUTO_PASS=0.90
 OCR_CONFIDENCE_REVIEW=0.70
 ```
+
+当前后端已内置阿里云 OCR 适配层：
+
+- 学生整张答题照片走 `RecognizeHandwriting`，返回 `answers`、`confidence` 后进入现有自动判题与教师复核队列。
+- 教材截图导入走 `RecognizeGeneral`，返回 `extracted_text` 后进入现有学习包生成流程。
+- 如果 `OCR_PROVIDER=aliyun` 但未配置 AK/SK，或云端调用失败，会自动回退到演示 mock 逻辑，保证参赛演示不中断。
+
+也可以继续使用自定义 OCR 网关：保持 `OCR_PROVIDER` 非 `aliyun`，填写 `OCR_API_URL` 和 `OCR_API_KEY`，网关返回 `answers` 或 `recognized_answers` 与 `confidence` 即可。
 
 推荐流程：
 
@@ -427,7 +445,7 @@ POST /api/review/answers/{answer_id}
 POST /api/review/answers/batch
 ```
 
-当前版本 `image-sheet`、`image`、待复核查询、单题复核和批量复核均已可用。正式环境只需要把 `OCR_API_URL` 指向云 OCR/手写识别网关，网关返回 `answers` 或 `recognized_answers` 与 `confidence` 即可接入现有复核链路。
+当前版本 `image-sheet`、`image`、待复核查询、单题复核和批量复核均已可用。正式环境可直接配置阿里云 OCR，或把 `OCR_API_URL` 指向云 OCR/手写识别网关。
 
 ## 8. ASR 语音识别接入方式
 

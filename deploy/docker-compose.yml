@@ -57,6 +57,9 @@ services:
       OCR_PROVIDER: ${OCR_PROVIDER:-mock}
       OCR_API_URL: ${OCR_API_URL:-}
       OCR_API_KEY: ${OCR_API_KEY:-}
+      ALIYUN_ACCESS_KEY_ID: ${ALIYUN_ACCESS_KEY_ID:-}
+      ALIYUN_ACCESS_KEY_SECRET: ${ALIYUN_ACCESS_KEY_SECRET:-}
+      ALIYUN_OCR_ENDPOINT: ${ALIYUN_OCR_ENDPOINT:-ocr-api.cn-hangzhou.aliyuncs.com}
       ASR_PROVIDER: ${ASR_PROVIDER:-mock}
       ASR_API_URL: ${ASR_API_URL:-}
       ASR_API_KEY: ${ASR_API_KEY:-}

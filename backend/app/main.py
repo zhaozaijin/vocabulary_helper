@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import hashlib
 import io
@@ -21,8 +22,20 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 try:
+    from .aliyun_ocr import (
+        aliyun_ocr_enabled,
+        is_aliyun_ocr_provider,
+        recognize_answer_sheet_with_aliyun,
+        recognize_material_text_with_aliyun,
+    )
     from .textbook_knowledge import TEXTBOOK_CHAR_META, YEAR_ONE_LESSONS
 except ImportError:  # pragma: no cover - supports direct script execution in local debugging.
+    from aliyun_ocr import (
+        aliyun_ocr_enabled,
+        is_aliyun_ocr_provider,
+        recognize_answer_sheet_with_aliyun,
+        recognize_material_text_with_aliyun,
+    )
     from textbook_knowledge import TEXTBOOK_CHAR_META, YEAR_ONE_LESSONS
 
 
@@ -783,6 +796,13 @@ def choice_options_for(char: str) -> List[str]:
 async def call_generic_ocr(file: UploadFile, expected_answers: List[str]) -> Tuple[List[str], float, str]:
     filename = (file.filename or "").lower()
     content = await file.read()
+    if is_aliyun_ocr_provider(OCR_PROVIDER) and aliyun_ocr_enabled(OCR_PROVIDER):
+        try:
+            result = await asyncio.to_thread(recognize_answer_sheet_with_aliyun, content, expected_answers)
+            if result.answers:
+                return result.answers, result.confidence, result.provider
+        except Exception:
+            pass
     if OCR_API_URL and OCR_API_KEY:
         try:
             async with httpx.AsyncClient(timeout=45) as client:
@@ -833,6 +853,13 @@ def extract_text_from_ocr_payload(payload: Dict[str, Any]) -> str:
 
 async def call_material_text_ocr(file: UploadFile) -> Tuple[str, float, str]:
     content = await file.read()
+    if is_aliyun_ocr_provider(OCR_PROVIDER) and aliyun_ocr_enabled(OCR_PROVIDER):
+        try:
+            result = await asyncio.to_thread(recognize_material_text_with_aliyun, content)
+            if result.raw_text:
+                return result.raw_text, result.confidence, result.provider
+        except Exception:
+            pass
     if OCR_API_URL:
         try:
             headers = {"Authorization": f"Bearer {OCR_API_KEY}"} if OCR_API_KEY else {}
@@ -1051,12 +1078,14 @@ def startup() -> None:
 
 @app.get("/api/health")
 def health() -> Dict[str, Any]:
+    ocr_cloud_ready = (OCR_API_URL and OCR_API_KEY) or aliyun_ocr_enabled(OCR_PROVIDER)
     return {
         "ok": True,
         "name": APP_NAME,
         "database": "postgresql" if db.is_postgres else "sqlite",
         "ai_mode": "cloud" if AI_API_BASE and AI_API_KEY else "fallback",
-        "ocr_mode": "cloud" if OCR_API_URL and OCR_API_KEY else "mock",
+        "ocr_mode": "cloud" if ocr_cloud_ready else "mock",
+        "ocr_provider": OCR_PROVIDER,
         "asr_mode": "cloud" if ASR_API_URL and ASR_API_KEY else "mock",
         "time": now_iso(),
     }
