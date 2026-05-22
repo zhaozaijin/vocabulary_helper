@@ -179,7 +179,44 @@ def split_answer_text(payload: Dict[str, Any], expected_answers: List[str]) -> L
         lines = clean_answer_lines(re.split(r"[\s,，、;；]+", text))
     if len(lines) == 1 and expected_count > 1:
         lines = split_compact_text(lines[0], expected_answers)
-    return lines
+    return fit_answer_lines_to_expected(lines, expected_answers)
+
+
+def fit_answer_lines_to_expected(lines: List[str], expected_answers: List[str]) -> List[str]:
+    expected_count = len(expected_answers)
+    if expected_count <= 0 or len(lines) <= expected_count:
+        return lines
+
+    result: List[str] = []
+    index = 0
+    expected_lengths = [max(1, len(normalize_ocr_answer(answer))) for answer in expected_answers]
+    for answer_index, expected_length in enumerate(expected_lengths):
+        if index >= len(lines):
+            break
+        remaining_answers = expected_count - answer_index
+        value = ""
+        while index < len(lines):
+            remaining_lines_after_current = len(lines) - index - 1
+            remaining_answers_after_current = remaining_answers - 1
+            value += lines[index]
+            index += 1
+            if (
+                len(normalize_ocr_answer(value)) >= expected_length
+                and remaining_lines_after_current >= remaining_answers_after_current
+            ):
+                break
+        result.append(normalize_ocr_answer(value))
+
+    while len(result) < expected_count:
+        result.append("")
+
+    if index < len(lines) and result:
+        final_expected_length = expected_lengths[-1]
+        for extra_line in lines[index:]:
+            if len(normalize_ocr_answer(result[-1])) >= final_expected_length:
+                break
+            result[-1] = normalize_ocr_answer(result[-1] + extra_line)
+    return result[:expected_count]
 
 
 def clean_answer_lines(values: Iterable[str]) -> List[str]:
