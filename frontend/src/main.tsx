@@ -878,12 +878,6 @@ function TeacherStudio({
           <Col xs={24} lg={16}>
             {pack ? (
               <Space direction="vertical" size={12} className="full">
-                <Alert
-                  type={pack.ai_status === 'success' ? 'success' : 'info'}
-                  showIcon
-                  message={pack.ai_status === 'success' ? '已接入云端 AI 生成' : '当前使用本地演示兜底生成'}
-                  description="教师确认后即可发布听写任务。云端部署配置 AI_API_KEY 后会优先调用真实大模型。"
-                />
                 <Table<CharacterItem>
                   rowKey={(record) => `${record.char}-${record.display_pinyin}`}
                   dataSource={pack.content.characters}
