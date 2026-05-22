@@ -1268,6 +1268,7 @@ class CreateTaskRequest(BaseModel):
     mode: str = "classroom"
     question_type: str = "word"
     selected_answers: Optional[List[str]] = None
+    custom_items: Optional[List[Dict[str, Any]]] = None
     deadline: Optional[str] = None
     settings: Dict[str, Any] = Field(default_factory=lambda: {"speed": 0.9, "repeat": 1, "interval_seconds": 8})
 
@@ -1513,9 +1514,23 @@ def create_dictation_task(request: CreateTaskRequest) -> Dict[str, Any]:
     pack = get_learning_pack(request.learning_pack_id)
     question_type = request.question_type if request.question_type in {"word", "char", "pinyin", "pinyin_to_word", "choice"} else "word"
     items = pack["content"].get("dictation_items", [])
-    if request.selected_answers:
+    custom_items = [item for item in (request.custom_items or []) if normalize_answer(item.get("answer", ""))]
+    using_custom_items = bool(custom_items)
+    if using_custom_items:
+        items = custom_items
+    elif request.selected_answers:
         selected = {normalize_answer(answer) for answer in request.selected_answers}
-        items = [item for item in items if normalize_answer(item.get("answer", "")) in selected]
+        filtered_items = []
+        for item in items:
+            original_answer = normalize_answer(item.get("answer", ""))
+            char_answer = normalize_answer(item.get("char") or (original_answer[:1] if original_answer else ""))
+            if question_type in {"char", "choice"}:
+                matched = original_answer in selected or char_answer in selected
+            else:
+                matched = original_answer in selected
+            if matched:
+                filtered_items.append(item)
+        items = filtered_items
     if not items:
         raise HTTPException(status_code=400, detail="听写范围不能为空")
     task_id = new_id("task")
@@ -1549,47 +1564,63 @@ def create_dictation_task(request: CreateTaskRequest) -> Dict[str, Any]:
         ),
     )
     rows = []
+    seen_task_answers = set()
     for index, item in enumerate(items, start=1):
-        original_answer = item.get("answer", "")
-        char = item.get("char") or (original_answer[0] if original_answer else "")
-        if question_type == "char":
-            answer = char or original_answer
-            prompt = item.get("prompt_text") or f"请写这个字：{answer}"
-            audio_text = answer
-        elif question_type == "pinyin":
-            answer = word_display_pinyin(original_answer)
-            prompt = f"请写拼音：{original_answer}"
-            audio_text = original_answer
-        elif question_type == "pinyin_to_word":
-            answer = original_answer
-            prompt = f"看拼音写词语：{word_display_pinyin(original_answer)}"
-            audio_text = word_display_pinyin(original_answer)
-        elif question_type == "choice":
-            answer = char or original_answer[:1]
-            prompt = "听音选字：请从选项中选择正确的字"
-            audio_text = answer
+        item_type = item.get("type") if item.get("type") in {"word", "char", "pinyin", "pinyin_to_word", "choice"} else question_type
+        if using_custom_items:
+            answer = clean_storage_text(item.get("answer"))
+            original_answer = clean_storage_text(item.get("source_answer") or item.get("original_answer") or answer)
+            char = clean_storage_text(item.get("char") or (answer[0] if answer else ""))
+            prompt = clean_storage_text(item.get("prompt_text")) or f"请写：{answer}"
+            audio_text = clean_dictation_audio_text(clean_storage_text(item.get("audio_text")), answer)
         else:
-            answer = original_answer
-            prompt = item.get("prompt_text") or f"请写：{answer}"
-            audio_text = clean_dictation_audio_text(item.get("audio_text", ""), answer)
-        meta = {"char": char, "difficulty": item.get("difficulty", 1), "original_answer": original_answer, "question_type": question_type}
-        if question_type == "pinyin_to_word":
+            original_answer = item.get("answer", "")
+            char = item.get("char") or (original_answer[0] if original_answer else "")
+            if question_type == "char":
+                answer = char or original_answer
+                prompt = f"请写这个字：{answer}"
+                audio_text = answer
+            elif question_type == "pinyin":
+                answer = word_display_pinyin(original_answer)
+                prompt = f"请写拼音：{original_answer}"
+                audio_text = original_answer
+            elif question_type == "pinyin_to_word":
+                answer = original_answer
+                prompt = f"看拼音写词语：{word_display_pinyin(original_answer)}"
+                audio_text = word_display_pinyin(original_answer)
+            elif question_type == "choice":
+                answer = char or original_answer[:1]
+                prompt = "听音选字：请从选项中选择正确的字"
+                audio_text = answer
+            else:
+                answer = original_answer
+                prompt = item.get("prompt_text") or f"请写：{answer}"
+                audio_text = clean_dictation_audio_text(item.get("audio_text", ""), answer)
+        if item_type in {"char", "choice"}:
+            task_answer_key = normalize_answer(answer)
+            if task_answer_key in seen_task_answers:
+                continue
+            seen_task_answers.add(task_answer_key)
+        meta = {"char": char, "difficulty": item.get("difficulty", 1), "original_answer": original_answer, "question_type": item_type}
+        if item_type == "pinyin_to_word":
             meta["display_pinyin"] = word_display_pinyin(original_answer)
-        if question_type == "choice":
+        if item_type == "choice":
             meta["options"] = choice_options_for(answer)
         rows.append(
             (
                 new_id("item"),
                 task_id,
-                question_type,
+                item_type,
                 prompt,
                 answer,
                 json_dumps(meta),
                 audio_text,
-                index,
+                len(rows) + 1,
                 int(item.get("difficulty", 1)),
             )
         )
+    if not rows:
+        raise HTTPException(status_code=400, detail="听写范围不能为空")
     db.many(
         """
         INSERT INTO dictation_items

@@ -567,6 +567,10 @@ body {
   border-radius: 7px !important;
 }
 
+.modal-inline-alert {
+  margin-bottom: 12px;
+}
+
 @media (max-width: 768px) {
   .header {
     align-items: flex-start;

@@ -75,6 +75,12 @@ const { Header, Content } = Layout;
 const { Title, Text } = Typography;
 const DEFAULT_TEACHER_ID = 'teacher_demo';
 
+type DictationPreviewItem = DictationPackItem & {
+  override_key: string;
+  source_answer?: string;
+  source_index: number;
+};
+
 function useBootstrap() {
   const [classes, setClasses] = useState<ClassRoom[]>([]);
   const [lessons, setLessons] = useState<Lesson[]>([]);
@@ -167,6 +173,104 @@ function confusingCharsToText(value?: Array<{ char: string; reason: string }>) {
   return (value || []).map((item) => `${item.char}：${item.reason}`).join('\n');
 }
 
+function getDictationChar(item: DictationPackItem) {
+  return String(item.char || item.answer?.trim().slice(0, 1) || '').trim();
+}
+
+function getDictationScopeOptions(items: DictationPackItem[], questionType?: string) {
+  const type = questionType || 'word';
+  const seen = new Set<string>();
+  return items
+    .map((item) => {
+      const answer = String(item.answer || '').trim();
+      const char = getDictationChar(item);
+      const value = type === 'char' || type === 'choice' ? char || answer : answer;
+      const label = type === 'char' || type === 'choice' ? char || answer : answer;
+      const key = `${type}:${value}`;
+      if (!value || seen.has(key)) return null;
+      seen.add(key);
+      return { label, value };
+    })
+    .filter((item): item is { label: string; value: string } => Boolean(item));
+}
+
+function getWordDisplayPinyin(word: string, characters: CharacterItem[]) {
+  const pinyinByChar = new Map(characters.map((item) => [item.char, item.display_pinyin || item.pinyin || item.char]));
+  return Array.from(word)
+    .map((char) => pinyinByChar.get(char) || char)
+    .join(' ');
+}
+
+function getTaskDictationPreviewItems(
+  items: DictationPackItem[],
+  characters: CharacterItem[],
+  questionType?: string,
+  selectedAnswers?: string[],
+  overrides: Record<string, Partial<DictationPackItem>> = {}
+): DictationPreviewItem[] {
+  const type = questionType || 'word';
+  const selected = new Set((selectedAnswers || []).map((item) => String(item || '').trim()).filter(Boolean));
+  const seen = new Set<string>();
+  const previewItems: DictationPreviewItem[] = [];
+
+  items.forEach((item, sourceIndex) => {
+    const originalAnswer = String(item.answer || '').trim();
+    const char = getDictationChar(item);
+    const selectedMatch =
+      selected.size === 0 ||
+      (type === 'char' || type === 'choice'
+        ? selected.has(originalAnswer) || selected.has(char)
+        : selected.has(originalAnswer));
+    if (!originalAnswer || !selectedMatch) return;
+
+    let answer = originalAnswer;
+    let promptText = item.prompt_text;
+    let audioText = item.audio_text || originalAnswer;
+
+    if (type === 'char') {
+      answer = char || originalAnswer;
+      promptText = `请写这个字：${answer}`;
+      audioText = answer;
+    } else if (type === 'pinyin') {
+      answer = getWordDisplayPinyin(originalAnswer, characters);
+      promptText = `请写拼音：${originalAnswer}`;
+      audioText = originalAnswer;
+    } else if (type === 'pinyin_to_word') {
+      const displayPinyin = getWordDisplayPinyin(originalAnswer, characters);
+      answer = originalAnswer;
+      promptText = `看拼音写词语：${displayPinyin}`;
+      audioText = displayPinyin;
+    } else if (type === 'choice') {
+      answer = char || originalAnswer.slice(0, 1);
+      promptText = '听音选字：请从选项中选择正确的字';
+      audioText = answer;
+    }
+
+    if (type === 'char' || type === 'choice') {
+      const key = answer.trim();
+      if (seen.has(key)) return;
+      seen.add(key);
+    }
+
+    const overrideKey = `${type}:${sourceIndex}`;
+    const override = overrides[overrideKey] || {};
+    previewItems.push({
+      ...item,
+      type,
+      answer,
+      prompt_text: promptText,
+      audio_text: audioText,
+      char: char || answer.slice(0, 1),
+      ...override,
+      override_key: overrideKey,
+      source_answer: originalAnswer,
+      source_index: sourceIndex
+    });
+  });
+
+  return previewItems;
+}
+
 function speakChinese(text?: string) {
   if (!text || !window.speechSynthesis) return;
   window.speechSynthesis.cancel();
@@ -204,6 +308,8 @@ function TeacherStudio({
   const [editingCharIndex, setEditingCharIndex] = useState<number | null>(null);
   const [dictationEditorOpen, setDictationEditorOpen] = useState(false);
   const [editingDictationIndex, setEditingDictationIndex] = useState<number | null>(null);
+  const [editingDictationPreviewKey, setEditingDictationPreviewKey] = useState<string | null>(null);
+  const [taskItemOverrides, setTaskItemOverrides] = useState<Record<string, Partial<DictationPackItem>>>({});
   const [learningCardItem, setLearningCardItem] = useState<CharacterItem | null>(null);
   const materialImageInputRef = useRef<HTMLInputElement>(null);
   const wordListInputRef = useRef<HTMLInputElement>(null);
@@ -229,13 +335,38 @@ function TeacherStudio({
     }
   }, [form, selectedLesson]);
 
+  const watchedQuestionType = Form.useWatch('question_type', taskForm);
+  const watchedSelectedAnswers = Form.useWatch('selected_answers', taskForm);
+  const currentTaskQuestionType = String(watchedQuestionType || taskForm.getFieldValue('question_type') || 'word');
+  const dictationScopeOptions = useMemo(
+    () => getDictationScopeOptions(pack?.content.dictation_items || [], currentTaskQuestionType),
+    [currentTaskQuestionType, pack]
+  );
+  const taskDictationPreviewItems = useMemo(
+    () =>
+      getTaskDictationPreviewItems(
+        pack?.content.dictation_items || [],
+        pack?.content.characters || [],
+        currentTaskQuestionType,
+        watchedSelectedAnswers || taskForm.getFieldValue('selected_answers') || [],
+        taskItemOverrides
+      ),
+    [currentTaskQuestionType, pack, taskForm, watchedSelectedAnswers, taskItemOverrides]
+  );
+
+  const resetDictationScope = (questionType: string) => {
+    const nextOptions = getDictationScopeOptions(pack?.content.dictation_items || [], questionType);
+    taskForm.setFieldsValue({ selected_answers: nextOptions.map((item) => item.value) });
+  };
+
   useEffect(() => {
     if (!pack) return;
+    const defaultScopeOptions = getDictationScopeOptions(pack.content.dictation_items, 'word');
     taskForm.setFieldsValue({
       title: `${pack.content.lesson.title} AI 听写任务`,
       class_id: activeClassId,
       question_type: 'word',
-      selected_answers: pack.content.dictation_items.map((item) => item.answer),
+      selected_answers: defaultScopeOptions.map((item) => item.value),
       interval_seconds: 8,
       repeat: 1,
       deadline: ''
@@ -315,6 +446,7 @@ function TeacherStudio({
       });
       setTask(null);
       setReport(null);
+      setTaskItemOverrides({});
       message.success(response.ai_status === 'success' ? 'AI 学习包已生成' : '已使用演示兜底规则生成学习包');
     } catch (error) {
       message.error((error as Error).message);
@@ -405,6 +537,7 @@ function TeacherStudio({
 
   const openDictationEditor = (index: number | null) => {
     setEditingDictationIndex(index);
+    setEditingDictationPreviewKey(null);
     setDictationEditorOpen(true);
     const item = index === null ? undefined : pack?.content.dictation_items[index];
     dictationForm.setFieldsValue(
@@ -419,6 +552,25 @@ function TeacherStudio({
     );
   };
 
+  const openDictationPreviewEditor = (item: DictationPreviewItem) => {
+    setEditingDictationIndex(item.source_index);
+    setEditingDictationPreviewKey(item.override_key);
+    setDictationEditorOpen(true);
+    dictationForm.setFieldsValue({
+      type: item.type || currentTaskQuestionType,
+      answer: item.answer,
+      prompt_text: item.prompt_text,
+      audio_text: item.audio_text,
+      difficulty: item.difficulty,
+      char: item.char || item.answer?.[0] || ''
+    });
+  };
+
+  const closeDictationEditor = () => {
+    setDictationEditorOpen(false);
+    setEditingDictationPreviewKey(null);
+  };
+
   const saveDictationItem = async () => {
     if (!pack) return;
     const values = await dictationForm.validateFields();
@@ -430,6 +582,16 @@ function TeacherStudio({
       difficulty: Number(values.difficulty || 1),
       char: values.char || values.answer?.[0] || ''
     };
+    if (editingDictationPreviewKey) {
+      setTaskItemOverrides((current) => ({
+        ...current,
+        [editingDictationPreviewKey]: item
+      }));
+      message.success('当前任务听写项已更新');
+      setDictationEditorOpen(false);
+      setEditingDictationPreviewKey(null);
+      return;
+    }
     const dictation_items = [...pack.content.dictation_items];
     if (editingDictationIndex === null) {
       dictation_items.push(item);
@@ -437,6 +599,7 @@ function TeacherStudio({
       dictation_items[editingDictationIndex] = item;
     }
     await savePackContent({ ...pack.content, dictation_items }, '听写清单已保存');
+    setTaskItemOverrides({});
     setDictationEditorOpen(false);
   };
 
@@ -444,6 +607,7 @@ function TeacherStudio({
     if (!pack) return;
     const dictation_items = pack.content.dictation_items.filter((_, current) => current !== index);
     await savePackContent({ ...pack.content, dictation_items }, '听写题已删除');
+    setTaskItemOverrides({});
   };
 
   const confirmAndPublish = async () => {
@@ -451,6 +615,10 @@ function TeacherStudio({
     const values = await taskForm.validateFields();
     if (!values.selected_answers?.length) {
       message.warning('请至少选择一个听写词语');
+      return;
+    }
+    if (!taskDictationPreviewItems.length) {
+      message.warning('当前听写清单为空');
       return;
     }
     const targetClassId = values.class_id || activeClassId;
@@ -474,6 +642,15 @@ function TeacherStudio({
           mode: 'classroom',
           question_type: values.question_type,
           selected_answers: values.selected_answers,
+          custom_items: taskDictationPreviewItems.map((item) => ({
+            type: item.type,
+            answer: item.answer,
+            prompt_text: item.prompt_text,
+            audio_text: item.audio_text,
+            difficulty: item.difficulty,
+            char: item.char,
+            source_answer: item.source_answer
+          })),
           deadline: values.deadline ? new Date(values.deadline).toISOString() : undefined,
           settings: {
             speed: 0.9,
@@ -547,21 +724,27 @@ function TeacherStudio({
       )
     }
   ];
-  const dictationColumns = [
-    { title: '序号', width: 70, render: (_: unknown, __: DictationPackItem, index: number) => index + 1 },
+  const dictationPreviewColumns = [
+    { title: '序号', width: 70, render: (_: unknown, __: DictationPreviewItem, index: number) => index + 1 },
     { title: '题型', dataIndex: 'type', width: 90, render: (value: string) => questionTypeLabel(value) },
     { title: '答案', dataIndex: 'answer', render: (value: string) => <HanziGridWord value={value} /> },
+    {
+      title: '来源词语',
+      dataIndex: 'source_answer',
+      width: 120,
+      render: (value: string, record: DictationPreviewItem) => (value && value !== record.answer ? <Tag>{value}</Tag> : '—')
+    },
     { title: '朗读文本', dataIndex: 'audio_text' },
     { title: '难度', dataIndex: 'difficulty', width: 80 },
     {
       title: '操作',
       width: 150,
-      render: (_: unknown, __: DictationPackItem, index: number) => (
+      render: (_: unknown, record: DictationPreviewItem) => (
         <Space size={4}>
-          <Button size="small" icon={<EditOutlined />} onClick={() => openDictationEditor(index)}>
+          <Button size="small" icon={<EditOutlined />} onClick={() => openDictationPreviewEditor(record)}>
             编辑
           </Button>
-          <Popconfirm title="删除这道听写题？" onConfirm={() => deleteDictationItem(index)}>
+          <Popconfirm title="删除这道来源听写题？" onConfirm={() => deleteDictationItem(record.source_index)}>
             <Button size="small" danger icon={<DeleteOutlined />} />
           </Popconfirm>
         </Space>
@@ -725,17 +908,6 @@ function TeacherStudio({
                     </>
                   )}
                 </Space>
-                <div className="inner-panel">
-                  <div className="inner-title">听写清单</div>
-                  <Table<DictationPackItem>
-                    rowKey={(record, index) => `${record.answer}-${index}`}
-                    dataSource={pack.content.dictation_items}
-                    columns={dictationColumns}
-                    pagination={false}
-                    size="small"
-                    scroll={{ x: 820 }}
-                  />
-                </div>
                 <div className="task-config-panel">
                   <div className="inner-title">
                     <ScheduleOutlined /> 听写任务配置
@@ -759,6 +931,7 @@ function TeacherStudio({
                       <Col xs={24} md={12}>
                         <Form.Item name="question_type" label="题型" rules={[{ required: true }]}>
                           <Select
+                            onChange={resetDictationScope}
                             options={[
                               { value: 'word', label: '字词听写' },
                               { value: 'char', label: '单字听写' },
@@ -788,10 +961,7 @@ function TeacherStudio({
                         <Form.Item name="selected_answers" label="听写范围" rules={[{ required: true }]}>
                           <Checkbox.Group
                             className="dictation-scope"
-                            options={pack.content.dictation_items.map((item) => ({
-                              label: item.answer,
-                              value: item.answer
-                            }))}
+                            options={dictationScopeOptions}
                           />
                         </Form.Item>
                       </Col>
@@ -800,6 +970,17 @@ function TeacherStudio({
                       确认学习包并发布听写
                     </Button>
                   </Form>
+                </div>
+                <div className="inner-panel">
+                  <div className="inner-title">当前任务听写清单</div>
+                  <Table<DictationPreviewItem>
+                    rowKey={(record, index) => `${record.source_index}-${record.type}-${record.answer}-${index}`}
+                    dataSource={taskDictationPreviewItems}
+                    columns={dictationPreviewColumns}
+                    pagination={false}
+                    size="small"
+                    scroll={{ x: 920 }}
+                  />
                 </div>
               </Space>
             ) : (
@@ -870,13 +1051,21 @@ function TeacherStudio({
         </Form>
       </Modal>
       <Modal
-        title={editingDictationIndex === null ? '新增听写题' : '编辑听写题'}
+        title={editingDictationPreviewKey ? '编辑当前任务听写项' : editingDictationIndex === null ? '新增听写题' : '编辑原始听写题'}
         open={dictationEditorOpen}
-        onCancel={() => setDictationEditorOpen(false)}
+        onCancel={closeDictationEditor}
         onOk={saveDictationItem}
         confirmLoading={loading}
         okText="保存"
       >
+        {editingDictationPreviewKey && (
+          <Alert
+            type="info"
+            showIcon
+            className="modal-inline-alert"
+            message="这里编辑的是当前任务预览项，保存后会用于本次发布；原始学习包词语不会被改写。"
+          />
+        )}
         <Form form={dictationForm} layout="vertical">
           <Row gutter={12}>
             <Col span={12}>
