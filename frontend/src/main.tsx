@@ -81,6 +81,84 @@ type DictationPreviewItem = DictationPackItem & {
   source_index: number;
 };
 
+type UnknownRecord = Record<string, unknown>;
+
+function isRecord(value: unknown): value is UnknownRecord {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function displayText(value: unknown, fallback = ''): string {
+  if (value === null || value === undefined) return fallback;
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => displayText(item)).filter(Boolean).join('、') || fallback;
+  }
+  return fallback;
+}
+
+function safeAnswerRows(sheetResult: AnswerSheetResult | null, submission: Submission | null): AnswerResult[] {
+  const rows = Array.isArray(sheetResult?.answers)
+    ? sheetResult.answers
+    : Array.isArray(submission?.answers)
+      ? submission.answers
+      : [];
+  return rows.filter(isRecord) as unknown as AnswerResult[];
+}
+
+function feedbackSummary(value: unknown): string {
+  if (!isRecord(value)) return displayText(value);
+  const tips = Array.isArray(value.tips) ? value.tips : [];
+  return displayText(tips[0] || value.message || '');
+}
+
+function normalizeSubmissionPayload(value: unknown, fallback: Submission | null): Submission | null {
+  if (!isRecord(value)) return fallback;
+  return {
+    ...(value as unknown as Submission),
+    answers: Array.isArray(value.answers) ? (value.answers.filter(isRecord) as unknown as AnswerResult[]) : []
+  };
+}
+
+function normalizeAnswerSheetPayload(value: unknown, fallbackSubmission: Submission | null): AnswerSheetResult {
+  const payload = isRecord(value) ? value : {};
+  return {
+    provider: displayText(payload.provider, 'unknown'),
+    confidence: typeof payload.confidence === 'number' ? payload.confidence : Number(payload.confidence || 0),
+    recognized_answers: Array.isArray(payload.recognized_answers)
+      ? payload.recognized_answers.map((item) => displayText(item)).filter(Boolean)
+      : [],
+    answers: Array.isArray(payload.answers) ? (payload.answers.filter(isRecord) as unknown as AnswerResult[]) : [],
+    submission: normalizeSubmissionPayload(payload.submission, fallbackSubmission) as Submission
+  };
+}
+
+class AppErrorBoundary extends React.Component<React.PropsWithChildren, { message?: string }> {
+  constructor(props: React.PropsWithChildren) {
+    super(props);
+    this.state = {};
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return { message: error.message || '页面渲染异常' };
+  }
+
+  render() {
+    if (this.state.message) {
+      return (
+        <Alert
+          type="error"
+          showIcon
+          message="页面显示异常"
+          description="请刷新页面后重试；如果刚上传过答题照片，作答记录通常已经保存到服务端。"
+        />
+      );
+    }
+    return this.props.children;
+  }
+}
+
 function useBootstrap() {
   const [classes, setClasses] = useState<ClassRoom[]>([]);
   const [lessons, setLessons] = useState<Lesson[]>([]);
@@ -1563,12 +1641,13 @@ function StudentPractice({ students, taskHint }: { students: Student[]; taskHint
     try {
       const formData = new FormData();
       formData.append('image', file);
-      const result = await apiRequest<AnswerSheetResult>(`/submissions/${submission.id}/answers/image-sheet`, {
+      const rawResult = await apiRequest<AnswerSheetResult>(`/submissions/${submission.id}/answers/image-sheet`, {
         method: 'POST',
         body: formData
       });
+      const result = normalizeAnswerSheetPayload(rawResult, submission);
       setSheetResult(result);
-      setSubmission(result.submission);
+      setSubmission(result.submission || submission);
       await loadStudentData();
       message.success('答题照片已识别并完成判题');
     } catch (error) {
@@ -1779,7 +1858,7 @@ function StudentPractice({ students, taskHint }: { students: Student[]; taskHint
   };
 
   const accuracy = submission?.total_count ? Math.round((submission.correct_count / submission.total_count) * 100) : 0;
-  const recognizedRows = sheetResult?.answers || submission?.answers || [];
+  const recognizedRows = safeAnswerRows(sheetResult, submission);
 
   return (
     <Space direction="vertical" size={18} className="full">
@@ -1962,23 +2041,26 @@ function StudentPractice({ students, taskHint }: { students: Student[]; taskHint
                   </Space>
                   {recognizedRows.length > 0 && (
                     <Table
-                      rowKey="id"
+                      rowKey={(row) => {
+                        const itemId = isRecord(row) ? displayText(row.item_id) : '';
+                        return row.id || itemId || row.item?.id || row.raw_answer || row.normalized_answer;
+                      }}
                       size="small"
                       pagination={false}
                       dataSource={recognizedRows}
                       columns={[
-                        { title: '题号', dataIndex: ['item', 'order_no'], width: 70 },
-                        { title: '标准答案', dataIndex: ['item', 'answer'] },
-                        { title: '识别答案', dataIndex: 'normalized_answer' },
+                        { title: '题号', dataIndex: ['item', 'order_no'], width: 70, render: (value: unknown) => displayText(value) },
+                        { title: '标准答案', dataIndex: ['item', 'answer'], render: (value: unknown) => displayText(value) },
+                        { title: '识别答案', dataIndex: 'normalized_answer', render: (value: unknown) => displayText(value) },
                         {
                           title: '结果',
                           dataIndex: 'result',
-                          render: (value: string) => <Tag color={answerResultColor(value)}>{answerResultLabel(value)}</Tag>
+                          render: (value: unknown) => <Tag color={answerResultColor(value)}>{answerResultLabel(value)}</Tag>
                         },
                         {
                           title: '反馈',
                           dataIndex: 'feedback',
-                          render: (value: AnswerResult['feedback']) => value?.tips?.[0] || value?.message
+                          render: (value: unknown) => feedbackSummary(value)
                         }
                       ]}
                     />
@@ -2534,24 +2616,26 @@ function questionTypeLabel(value: string) {
   return map[value] || value;
 }
 
-function answerResultLabel(value: string) {
+function answerResultLabel(value: unknown) {
+  const key = displayText(value);
   const map: Record<string, string> = {
     correct: '正确',
     wrong: '错误',
     suspected: '疑似错误',
     pending_review: '待复核'
   };
-  return map[value] || value;
+  return map[key] || key || '未知';
 }
 
-function answerResultColor(value: string) {
+function answerResultColor(value: unknown) {
+  const key = displayText(value);
   const map: Record<string, string> = {
     correct: 'green',
     wrong: 'red',
     suspected: 'orange',
     pending_review: 'gold'
   };
-  return map[value] || 'default';
+  return map[key] || 'default';
 }
 
 function submissionStatusColor(value: string) {
@@ -2895,7 +2979,9 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <ConfigProvider locale={zhCN}>
       <AntdApp>
-        <RootApp />
+        <AppErrorBoundary>
+          <RootApp />
+        </AppErrorBoundary>
       </AntdApp>
     </ConfigProvider>
   </React.StrictMode>
