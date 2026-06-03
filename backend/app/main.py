@@ -5,9 +5,11 @@ import csv
 import hashlib
 import io
 import json
+import logging
 import os
 import re
 import sqlite3
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -16,7 +18,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import httpx
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -53,10 +55,19 @@ OCR_API_KEY = os.getenv("OCR_API_KEY", "")
 ASR_PROVIDER = os.getenv("ASR_PROVIDER", "mock")
 ASR_API_URL = os.getenv("ASR_API_URL", "").rstrip("/")
 ASR_API_KEY = os.getenv("ASR_API_KEY", "")
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
+api_logger = logging.getLogger("vocabulary_helper.api")
+api_logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+if not api_logger.handlers:
+    api_log_handler = logging.StreamHandler()
+    api_log_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
+    api_logger.addHandler(api_log_handler)
+api_logger.propagate = False
 
 
 def now_iso() -> str:
-    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def format_beijing_time(value: Optional[str]) -> str:
@@ -1313,6 +1324,42 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def log_api_request(request: Request, call_next):
+    started_at = time.perf_counter()
+    request_id = uuid.uuid4().hex[:12]
+    client = request.client.host if request.client else "-"
+    method = request.method
+    path = request.url.path
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        duration_ms = (time.perf_counter() - started_at) * 1000
+        api_logger.exception(
+            "api_request_failed request_id=%s method=%s path=%s status=500 duration_ms=%.2f client=%s error=%s",
+            request_id,
+            method,
+            path,
+            duration_ms,
+            client,
+            exc.__class__.__name__,
+        )
+        raise
+
+    duration_ms = (time.perf_counter() - started_at) * 1000
+    response.headers["X-Request-ID"] = request_id
+    api_logger.info(
+        "api_request request_id=%s method=%s path=%s status=%s duration_ms=%.2f client=%s",
+        request_id,
+        method,
+        path,
+        response.status_code,
+        duration_ms,
+        client,
+    )
+    return response
 
 
 @app.on_event("startup")
