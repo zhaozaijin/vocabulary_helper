@@ -52,7 +52,8 @@ class ComposeConfigTests(unittest.TestCase):
     def test_example_cannot_start_without_passwords(self):
         result = self.compose(env_file=ROOT / "deploy/.env.example")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("POSTGRES_PASSWORD", result.stderr)
+        # Compose may validate services in either order. Both secrets are empty.
+        self.assertRegex(result.stderr, r"(?:POSTGRES_PASSWORD|MINIO_ROOT_PASSWORD)")
 
     def test_credentials_and_default_port_bindings(self):
         result = self.compose({"POSTGRES_PASSWORD": "test-only-db", "MINIO_ROOT_PASSWORD": "test-only-storage"})
