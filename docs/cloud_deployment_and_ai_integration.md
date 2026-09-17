@@ -4,6 +4,8 @@
 日期：2026-05-19  
 适用项目：AI 生字词智能过关小助手参赛 MVP
 
+> 当前是演示 MVP，未实现完整登录鉴权、租户隔离和访问控制；包括演示重置在内的接口不能直接暴露到公网。以下云端部署应在受限网络中进行。公开源代码不等于可以直接上线真实学生数据。
+
 ## 1. 部署目标
 
 本 MVP 按技术方案 4.1 推荐栈实现：
@@ -54,11 +56,11 @@
 
 | 端口 | 服务 | 是否必须公网开放 |
 | --- | --- | --- |
-| 80 | 前端 Web | 是 |
+| 80 | 前端 Web | 默认仅本机；完成鉴权后按需通过网关提供访问 |
 | 443 | HTTPS | 正式环境建议开放 |
-| 8000 | 后端 API | 演示可开放，正式建议只内网 |
-| 9000 | MinIO API | 正式建议只内网 |
-| 9001 | MinIO 控制台 | 仅管理员临时开放 |
+| 8000 | 后端 API | 默认仅本机，不直接公网开放 |
+| 9000 | MinIO API | 默认仅本机 |
+| 9001 | MinIO 控制台 | 默认仅本机，通过 SSH 隧道管理 |
 | 5432 | PostgreSQL | 不建议公网开放 |
 | 6379 | Redis | 不建议公网开放 |
 
@@ -91,12 +93,9 @@ cp .env.example .env
 vim .env
 ```
 
-至少修改：
+分别运行两次 `openssl rand -hex 24`，将生成的不同密码填入 `.env` 的 `POSTGRES_PASSWORD` 和 `MINIO_ROOT_PASSWORD`。示例文件中的密码故意留空；未设置或为空时 Compose 会拒绝启动。十六进制密码也避免了数据库 URL 中特殊字符转义的问题。不要提交 `.env` 或把密码粘贴到 Issue。
 
-```bash
-POSTGRES_PASSWORD=change_me_strong_password
-MINIO_ROOT_PASSWORD=change_me_minio_password
-```
+已存在的 PostgreSQL 数据卷不会因修改环境变量自动更改数据库内的密码；已有部署需先备份，再按数据库的密码轮换流程同步修改。不要通过删除数据卷来解决密码不一致。
 
 如果要启用真实大模型生成，继续配置：
 
@@ -158,16 +157,18 @@ docker compose logs -f backend
 
 ### 3.5 验证部署
 
-访问：
+在服务器本机访问 `http://localhost/`；远程演示可建立隧道：
 
-```text
-http://服务器IP/
+```bash
+ssh -N -L 8080:127.0.0.1:80 user@your-server
 ```
+
+然后在本地浏览器打开 `http://localhost:8080/`。不要将未鉴权的接口直接暴露到公网。
 
 后端健康检查：
 
 ```bash
-curl http://服务器IP:8000/api/health
+curl http://127.0.0.1:8000/api/health
 ```
 
 正常返回示例：
@@ -184,7 +185,7 @@ curl http://服务器IP:8000/api/health
 
 如果 `ai_mode` 是 `fallback`，说明未启用云端大模型，但演示流程仍可用。
 
-### 3.6 正式环境功能验证清单
+### 3.6 受限演示环境功能验证清单
 
 部署后建议按以下顺序验证新增 MVP 功能：
 
@@ -287,7 +288,7 @@ docker compose up -d --build backend
 验证：
 
 ```bash
-curl http://服务器IP:8000/api/health
+curl http://127.0.0.1:8000/api/health
 ```
 
 返回中的 `ai_mode` 应为 `cloud`。
@@ -567,9 +568,9 @@ export_class_report
 
 ## 11. 生产安全配置建议
 
-### 11.1 必须修改默认密码
+### 11.1 必须设置独立密码
 
-部署前必须修改：
+部署前必须设置 PostgreSQL 和 MinIO 密码；仅在启用云服务时提供对应 API Key：
 
 ```bash
 POSTGRES_PASSWORD
@@ -586,14 +587,7 @@ AI_API_KEY
 443
 ```
 
-演示期间如需调试可临时开放：
-
-```text
-8000
-9001
-```
-
-调试结束后关闭。
+后端与 MinIO 映射端口绑定 `127.0.0.1`，请使用 SSH 隧道调试，不要直接开放到公网。前端默认同样绑定本机；必须先增加鉴权网关和相应的应用权限检查，再提供远程访问。
 
 ### 11.3 API Key 只放服务端
 
@@ -618,7 +612,7 @@ AI_API_KEY
 
 ```bash
 docker compose logs -f backend
-curl http://服务器IP:8000/api/health
+curl http://127.0.0.1:8000/api/health
 ```
 
 如果 AI Key 错误，系统会降级到 fallback；如果数据库异常，检查 PostgreSQL 容器是否健康。

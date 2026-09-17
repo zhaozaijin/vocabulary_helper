@@ -6,8 +6,17 @@ data/
 backend/data/
 frontend/node_modules/
 frontend/dist/
-deploy/.env
 .env
+.env.*
+!.env.example
+.local-logs/
+*.log
+*.db
+*.sqlite
+*.sqlite3
+*.pem
+*.key
+worktree/
 
 # Competition submission artifacts
 submission_materials/

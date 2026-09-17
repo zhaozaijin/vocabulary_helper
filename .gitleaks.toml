@@ -1,0 +1,12 @@
+[extend]
+useDefault = true
+
+# Historical examples have an empty key followed by a region assignment.
+# Gitleaks joins these lines and mistakes the region assignment for a key.
+# Keep scanning these files; suppress only this exact non-secret match.
+[[allowlists]]
+description = "Empty NLS key followed by the cn-shanghai region in examples"
+condition = "AND"
+paths = ['''^(backend|deploy)/\.env\.example$''']
+regexTarget = "match"
+regexes = ['''^ALIYUN_NLS_APP_KEY=\r?\nALIYUN_NLS_REGION=cn-shanghai$''']
